@@ -1,5 +1,6 @@
 mod rcnn;
 mod processing;
+mod triton_client;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

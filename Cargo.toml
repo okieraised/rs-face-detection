@@ -2,8 +2,20 @@
 name = "rs-faceid-pipeline"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 ndarray = "0.15.6"
 ndarray-npy = "0.8.1"
 ndarray-rand = "0.14.0"
+prost = "0.12.6"
+prost-build = "0.12.6"
+tonic = "0.11.0"
+tokio = { version = "1.37.0", features = ["rt", "rt-multi-thread", "macros"] }
+tonic-build = "0.11.0"
+
+[env]
+OUT_DIR = "./src/triton_client/"
+
+[build-dependencies]
+tonic-build = "0.11.0"
