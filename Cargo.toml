@@ -1,0 +1,9 @@
+[package]
+name = "rs-faceid-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.15.6"
+ndarray-npy = "0.8.1"
+ndarray-rand = "0.14.0"
