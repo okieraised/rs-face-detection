@@ -1,5 +1,4 @@
-use ndarray::{array, Array1, Array2, ArrayView1, ArrayView2, Ix1, Ix2, s};
-use ndarray_npy::write_npy;
+use ndarray::{Array1, ArrayView2, s};
 use std::cmp::Ordering;
 
 

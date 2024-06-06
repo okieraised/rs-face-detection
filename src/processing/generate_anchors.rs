@@ -1,16 +1,16 @@
-use ndarray::{array, Array, Array1, Array2, ArrayBase, Axis, s, Ix2};
+use ndarray::{array, Array, Array1, Array2, Axis, s, Ix2};
 use std::ops::{AddAssign, Div};
 use ndarray_rand::rand_distr::num_traits::real::Real;
 use std::collections::HashMap;
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub rpn_anchor_cfg: HashMap<String, AnchorConfig>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnchorConfig {
     pub base_size: i32,
     pub ratios: Vec<f32>,
@@ -18,7 +18,7 @@ pub struct AnchorConfig {
     pub allowed_border: i32,
 }
 
-fn _whctrs(anchor: &Array1<f32>) -> (f32, f32, f32, f32) {
+pub fn _whctrs(anchor: &Array1<f32>) -> (f32, f32, f32, f32) {
     let w = anchor[2] - anchor[0] + 1.0;
     let h = anchor[3] - anchor[1] + 1.0;
     let x_ctr = anchor[0] + 0.5 * (w - 1.0);
@@ -26,16 +26,7 @@ fn _whctrs(anchor: &Array1<f32>) -> (f32, f32, f32, f32) {
     (w, h, x_ctr, y_ctr)
 }
 
-// fn _mkanchors(ws: Array1<f32>, hs: Array1<f32>, x_ctr: f32, y_ctr: f32) -> Array2<f32> {
-//     let mut anchors = Array2::<f32>::zeros((ws.len(), 4));
-//     anchors.slice_mut(s![.., 0]).assign(&(x_ctr - 0.5 * (&ws - 1.0)));
-//     anchors.slice_mut(s![.., 1]).assign(&(y_ctr - 0.5 * (&hs - 1.0)));
-//     anchors.slice_mut(s![.., 2]).assign(&(x_ctr + 0.5 * (&ws - 1.0)));
-//     anchors.slice_mut(s![.., 3]).assign(&(y_ctr + 0.5 * (&hs - 1.0)));
-//     anchors
-// }
-
-fn _mkanchors(ws: Array1<f32>, hs: Array1<f32>, x_ctr: f32, y_ctr: f32) -> Array2<f32> {
+pub fn _mkanchors(ws: Array1<f32>, hs: Array1<f32>, x_ctr: f32, y_ctr: f32) -> Array2<f32> {
     let anchors = Array2::from_shape_fn((ws.len(), 4), |(i, j)| {
         match j {
             0 => x_ctr - 0.5 * (ws[i] - 1.0),
@@ -48,7 +39,7 @@ fn _mkanchors(ws: Array1<f32>, hs: Array1<f32>, x_ctr: f32, y_ctr: f32) -> Array
     anchors
 }
 
-fn generate_anchors(
+pub fn generate_anchors(
     base_size: usize,
     ratios: Array1<f32>,
     scales: Array1<f32>,
@@ -68,7 +59,7 @@ fn generate_anchors(
     anchors
 }
 
-fn generate_anchors2(
+pub fn generate_anchors2(
     base_size: usize,
     ratios: Array1<f32>,
     scales: Array1<f32>,
@@ -102,7 +93,7 @@ fn generate_anchors2(
     anchors
 }
 
-fn generate_anchors_fpn(
+pub fn generate_anchors_fpn(
     base_size: Vec<i32>,
     ratios: Vec<f32>,
     scales: Vec<f32>,
@@ -131,7 +122,7 @@ fn generate_anchors_fpn(
 /// Description
 /// * `dense_anchor` - bool
 /// * `cfg` - Option<&Config>
-fn generate_anchors_fpn2(dense_anchor: bool, cfg: Option<&Config>) -> Vec<Array2<f32>> {
+pub fn generate_anchors_fpn2(dense_anchor: bool, cfg: Option<&Config>) -> Vec<Array2<f32>> {
     let config = if let Some(cfg) = cfg {
         cfg
     } else {
@@ -156,7 +147,7 @@ fn generate_anchors_fpn2(dense_anchor: bool, cfg: Option<&Config>) -> Vec<Array2
 }
 
 
-fn _ratio_enum(anchor: &Array1<f32>, ratios: &Array1<f32>) -> Array2<f32> {
+pub fn _ratio_enum(anchor: &Array1<f32>, ratios: &Array1<f32>) -> Array2<f32> {
     let (w, h, x_ctr, y_ctr) = _whctrs(anchor);
     let size = w * h;
     let size_ratios = size / ratios;
@@ -166,7 +157,7 @@ fn _ratio_enum(anchor: &Array1<f32>, ratios: &Array1<f32>) -> Array2<f32> {
 }
 
 
-fn _scale_enum(anchor: &Array1<f32>, scales: &Array1<f32>) -> Array2<f32> {
+pub fn _scale_enum(anchor: &Array1<f32>, scales: &Array1<f32>) -> Array2<f32> {
     let (w, h, x_ctr, y_ctr) = _whctrs(anchor);
     let ws = scales.mapv(|scale| w * scale);
     let hs = scales.mapv(|scale| h * scale);

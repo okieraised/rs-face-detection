@@ -1,43 +1,237 @@
-// use ndarray::prelude::*;
-// use ndarray::{Array, Array2};
-// // use rcnn::bbox::{bbox_overlaps};
-// use std::collections::HashMap;
-// use crate::rcnn;
+use ndarray::prelude::*;
+use ndarray::{Array1, Array2, s, ArrayView2};
+use rcnn::bbox::{bbox_overlaps};
+use std::collections::HashMap;
+use crate::processing::bbox_transform::nonlinear_transform;
+use crate::rcnn;
+
+const BBOX_REGRESSION_THRES: f32 = 0.0;
+
+#[derive(Debug, Clone)]
+struct Config {
+    train: TrainConfig,
+}
+
+#[derive(Debug, Clone)]
+struct TrainConfig {
+    bbox_normalization_precomputed: bool,
+    bbox_means: Vec<f32>,
+    bbox_stds: Vec<f32>,
+    bbox_weights: Array1<f32>,
+}
+
+
+
+#[derive(Debug, Clone)]
+struct RoidbEntry {
+    boxes: Array2<f32>,
+    max_overlaps: Array1<f32>,
+    max_classes: Array1<usize>,
+    bbox_targets: Option<Array2<f32>>,
+}
+
+
+// fn argmax(array: &[f32]) -> usize {
+//     if array.is_empty() {
+//         panic!("Cannot find argmax of an empty array");
+//     }
 //
-// const BBOX_REGRESSION_THRES: f32 = 0.0;
+//     let mut max_index = 0;
+//     let mut max_value = array[0];
 //
-// #[derive(Debug, Clone)]
-// struct Config {
-//     train: TrainConfig,
+//     for (i, &value) in array.iter().enumerate().skip(1) {
+//         if value > max_value {
+//             max_value = value;
+//             max_index = i;
+//         }
+//     }
+//
+//     max_index
 // }
 //
-// #[derive(Debug, Clone)]
-// struct TrainConfig {
-//     bbox_normalization_precomputed: bool,
-//     bbox_means: Vec<f32>,
-//     bbox_stds: Vec<f32>,
-//     bbox_weights: Array1<f32>,
+// fn compute_bbox_regression_targets(
+//     rois: &Array2<f32>,
+//     overlaps: &Array1<f32>,
+//     labels: &Array1<f32>,
+//     bbox_regression_thresh: f32
+// ) -> Array2<f32> {
+//     // Ensure ROIs are floats (already ensured by type)
+//
+//     // Sanity check
+//     if rois.nrows() != overlaps.len() {
+//         eprintln!("bbox regression: len(rois) != len(overlaps)");
+//     }
+//
+//     // Indices of ground-truth ROIs
+//     let gt_inds: Vec<usize> = overlaps.iter()
+//         .enumerate()
+//         .filter(|&(_, &overlap)| overlap == 1.0)
+//         .map(|(i, _)| i)
+//         .collect();
+//     if gt_inds.is_empty() {
+//         eprintln!("bbox regression: len(gt_inds) == 0");
+//     }
+//
+//     // Indices of examples for which we try to make predictions
+//     let ex_inds: Vec<usize> = overlaps.iter()
+//         .enumerate()
+//         .filter(|&(_, &overlap)| overlap >= bbox_regression_thresh)
+//         .map(|(i, _)| i)
+//         .collect();
+//
+//     // Get IoU overlap between each ex ROI and gt ROI
+//     let ex_rois = rois.select(Axis(0), &ex_inds);
+//     let gt_rois = rois.select(Axis(0), &gt_inds);
+//     let ex_gt_overlaps = bbox_overlaps(&ex_rois, &gt_rois);
+//
+//     // Find which gt ROI each ex ROI has max overlap with
+//     let gt_assignment: Vec<usize> = ex_gt_overlaps.axis_iter(Axis(1))
+//         .map(|row| argmax(row.as_slice().unwrap()))
+//         .collect();
+//
+//     let gt_rois_assigned = gt_assignment.iter()
+//         .map(|&idx| gt_rois.slice(s![idx, ..]))
+//         .collect::<Vec<_>>();
+//
+//     // Prepare target array
+//     let mut targets = Array2::<f32>::zeros((rois.nrows(), 5));
+//
+//     // Set the labels
+//     for &ex_idx in &ex_inds {
+//         targets[[ex_idx, 0]] = labels[ex_idx];
+//     }
+//
+//     // Set the bbox regression targets
+//     for (i, &ex_idx) in ex_inds.iter().enumerate() {
+//         let ex_roi = rois.slice(s![ex_idx, ..]).to_owned();
+//         let gt_roi = gt_rois_assigned[i].to_owned();
+//         let ex_roi_2d = ex_roi.clone().into_shape((4, 1)).unwrap();
+//         let gt_roi_2d = gt_roi.clone().into_shape((4, 1)).unwrap();
+//         let bbox_trans = nonlinear_transform(&ex_roi_2d, &gt_roi_2d);
+//         targets.slice_mut(s![ex_idx, 1..]).assign(&bbox_trans);
+//     }
+//
+//     targets
 // }
 //
+// #[cfg(test)]
+// mod test {
+//     use ndarray::array;
+//     use crate::processing::bbox_regression::{compute_bbox_regression_targets};
 //
+//     #[test]
+//     fn test_compute_bbox_regression_target() {
+//         let rois = array![
+//             [10.0, 20.0, 50.0, 60.0],
+//             [15.0, 25.0, 55.0, 65.0]
+//         ];
+//         let overlaps = array![0.5, 1.0];
+//         let labels = array![1.0, 2.0];
+//         let bbox_regression_thresh = 0.5;
 //
-// #[derive(Debug, Clone)]
-// struct RoidbEntry {
-//     boxes: Array2<f32>,
-//     max_overlaps: Array1<f32>,
-//     max_classes: Array1<usize>,
-//     bbox_targets: Option<Array2<f32>>,
+//         let targets = compute_bbox_regression_targets(&rois, &overlaps, &labels, bbox_regression_thresh);
+//         println!("Targets:\n{:?}", targets);
+//     }
+
+    // #[test]
+    // fn test_expand_bbox_regression_target() {
+    //     let bbox_targets_data = array![
+    //         [1.0, 0.1, 0.2, 0.3, 0.4],
+    //         [2.0, 0.2, 0.3, 0.4, 0.5],
+    //         [0.0, 0.0, 0.0, 0.0, 0.0],
+    //         [1.0, 0.3, 0.4, 0.5, 0.6]
+    //     ];
+    //
+    //     let num_classes = 3;
+    //     let config = Config {
+    //         train: TrainConfig {
+    //             bbox_normalization_precomputed: false,
+    //             bbox_means: vec![],
+    //             bbox_stds: vec![],
+    //             bbox_weights: array![1.0, 1.0, 1.0, 1.0],
+    //         },
+    //     };
+    //
+    //     let (bbox_targets, bbox_weights) = expand_bbox_regression_targets(
+    //         &bbox_targets_data,
+    //         num_classes,
+    //         &config.train.bbox_weights,
+    //     );
+    //
+    //     println!("BBox Targets: {:?}", bbox_targets);
+    //     println!("BBox Weights: {:?}", bbox_weights);
+    // }
 // }
+
+
+
+// fn compute_bbox_regression_targets(
+//     rois: &Array2<f32>,
+//     overlaps: &Array1<f32>,
+//     labels: &Array1<f32>,
+//     bbox_regression_thresh: f32
+// ) -> Array2<f32> {
+//     // Ensure ROIs are floats (already ensured by type)
 //
-// /// compute_bbox_regression_targets: given rois, overlaps, gt labels, compute bounding box regression targets
-// ///
-// /// Description.
-// ///
-// /// * `rois` - roidb[i]['boxes'] k * 4.
-// /// * `overlaps` - roidb[i]['max_overlaps'] k * 1
-// /// * `labels` - roidb[i]['max_classes'] k * 1
-// /// * `overlaps` - Text about bar.
-// /// * `return` - targets[i][class, dx, dy, dw, dh] k * 5.
+//     // Sanity check
+//     assert!(rois.nrows() == overlaps.len());
+//
+//     if rois.nrows() != overlaps.len() {
+//         eprintln!("bbox regression: len(rois) != len(overlaps)");
+//     }
+//
+//     // Indices of ground-truth ROIs
+//     let gt_inds: Vec<usize> = overlaps.iter()
+//         .enumerate()
+//         .filter(|&(_, &overlap)| overlap == 1.0)
+//         .map(|(i, _)| i)
+//         .collect();
+//     assert!(!gt_inds.is_empty());
+//     if gt_inds.is_empty() {
+//         eprintln!("bbox regression: len(gt_inds) == 0");
+//     }
+//
+//     // Indices of examples for which we try to make predictions
+//     let ex_inds: Vec<usize> = overlaps.iter()
+//         .enumerate()
+//         .filter(|&(_, &overlap)| overlap >= bbox_regression_thresh)
+//         .map(|(i, _)| i)
+//         .collect();
+//
+//     // Get IoU overlap between each ex ROI and gt ROI
+//     let ex_rois = rois.select(Axis(0), &ex_inds);
+//     let gt_rois = rois.select(Axis(0), &gt_inds);
+//     let ex_gt_overlaps = bbox_overlaps(&ex_rois, &gt_rois);
+//
+//     // Find which gt ROI each ex ROI has max overlap with
+//     let gt_assignment: Vec<usize> = ex_gt_overlaps.axis_iter(Axis(1))
+//         .map(|row| argmax(row))
+//         .collect();
+//
+//     let gt_rois_assigned = gt_inds.iter()
+//         .enumerate()
+//         .map(|(i, &idx)| gt_rois.slice(s![idx, ..]))
+//         .collect::<Vec<_>>();
+//
+//     // Prepare target array
+//     let mut targets = Array2::<f32>::zeros((rois.nrows(), 5));
+//
+//     // Set the labels
+//     for &ex_idx in &ex_inds {
+//         targets[[ex_idx, 0]] = labels[ex_idx];
+//     }
+//
+//     // Set the bbox regression targets
+//     for (i, &ex_idx) in ex_inds.iter().enumerate() {
+//         let ex_roi = rois.slice(s![ex_idx, ..]);
+//         let gt_roi = rois.slice(s![gt_assignment[i], ..]);
+//         let bbox_trans = nonlinear_transform(&ex_roi.to_owned(), &gt_roi.to_owned());
+//         targets.slice_mut(s![ex_idx, 1..]).assign(&bbox_trans);
+//     }
+//
+//     targets
+// }
+
 // fn compute_bbox_regression_targets(
 //     rois: &Array2<f32>,
 //     overlaps: &Array1<f32>,
@@ -83,7 +277,7 @@
 //         targets[[i, 0]] = labels[i] as f32;
 //         let ex_roi = ex_rois.row(i).to_owned();
 //         let gt_roi = assigned_gt_rois.row(i).to_owned();
-//         let trans = bbox_transform(&ex_roi, &gt_roi);
+//         let trans = nonlinear_transform(&ex_roi, &gt_roi);
 //         for j in 0..4 {
 //             targets[[i, j + 1]] = trans[j];
 //         }
@@ -91,6 +285,7 @@
 //
 //     targets
 // }
+
 //
 // fn add_bbox_regression_targets(roidb: &mut Vec<RoidbEntry>, config: &Config) -> (Array1<f32>, Array1<f32>) {
 //     println!("bbox regression: add bounding box regression targets");
@@ -200,48 +395,3 @@
 //     (bbox_targets, bbox_weights)
 // }
 //
-// #[cfg(test)]
-// mod test {
-//     use ndarray::array;
-//     use crate::processing::bbox_regression::{compute_bbox_regression_targets, Config, expand_bbox_regression_targets, TrainConfig};
-//
-//     #[test]
-//     fn test_compute_bbox_regression_target() {
-//         let rois = array![[0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]].into_dyn();
-//         let overlaps = array![0.9, 1.0].into_dyn();
-//         let labels = array![1, 2].into_dyn();
-//         let bbox_regression_thresh = 0.5;
-//
-//         let targets = compute_bbox_regression_targets(&rois, &overlaps, &labels, bbox_regression_thresh);
-//         println!("Targets: {:?}", targets);
-//     }
-//
-//     #[test]
-//     fn test_expand_bbox_regression_target() {
-//         let bbox_targets_data = array![
-//             [1.0, 0.1, 0.2, 0.3, 0.4],
-//             [2.0, 0.2, 0.3, 0.4, 0.5],
-//             [0.0, 0.0, 0.0, 0.0, 0.0],
-//             [1.0, 0.3, 0.4, 0.5, 0.6]
-//         ];
-//
-//         let num_classes = 3;
-//         let config = Config {
-//             train: TrainConfig {
-//                 bbox_normalization_precomputed: false,
-//                 bbox_means: vec![],
-//                 bbox_stds: vec![],
-//                 bbox_weights: array![1.0, 1.0, 1.0, 1.0],
-//             },
-//         };
-//
-//         let (bbox_targets, bbox_weights) = expand_bbox_regression_targets(
-//             &bbox_targets_data,
-//             num_classes,
-//             &config.train.bbox_weights,
-//         );
-//
-//         println!("BBox Targets: {:?}", bbox_targets);
-//         println!("BBox Weights: {:?}", bbox_weights);
-//     }
-// }

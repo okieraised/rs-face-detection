@@ -7,7 +7,7 @@ use ndarray::{ArrayBase, Ix2};
 ///     IoU Calculation: For each pair of bounding boxes from boxes and query_boxes, it calculates the width (iw) and height (ih) of the intersection.
 ///     If there is an intersection (iw > 0 and ih > 0), it computes the area of both boxes and their union to calculate the IoU and store it in the overlaps array.
 ///     Return: The function returns the overlaps array.
-fn bbox_overlaps_py(boxes: &Array2<f32>, query_boxes: &Array2<f32>) -> Array2<f32> {
+pub fn bbox_overlaps_py(boxes: &Array2<f32>, query_boxes: &Array2<f32>) -> Array2<f32> {
     let n_ = boxes.nrows();
     let k_ = query_boxes.nrows();
     let mut overlaps = Array2::<f32>::zeros((n_, k_));
@@ -32,7 +32,7 @@ fn bbox_overlaps_py(boxes: &Array2<f32>, query_boxes: &Array2<f32>) -> Array2<f3
 }
 
 
-fn clip_boxes(boxes: &mut Array2<f32>, im_shape: (usize, usize)) {
+pub fn clip_boxes(boxes: &mut Array2<f32>, im_shape: (usize, usize)) {
     let rows = boxes.nrows();
     let cols = boxes.ncols();
     let width = im_shape.1 as f32 - 1.0;
@@ -52,7 +52,7 @@ fn clip_boxes(boxes: &mut Array2<f32>, im_shape: (usize, usize)) {
     }
 }
 
-fn clip_points(points: &mut Array2<f32>, im_shape: (usize, usize)) {
+pub fn clip_points(points: &mut Array2<f32>, im_shape: (usize, usize)) {
     let rows = points.nrows();
     let cols = points.ncols();
     let width = im_shape.1 as f32 - 1.0;
@@ -72,7 +72,7 @@ fn clip_points(points: &mut Array2<f32>, im_shape: (usize, usize)) {
     }
 }
 
-fn nonlinear_transform(ex_rois: &Array2<f32>, gt_rois: &Array2<f32>) -> Array2<f32> {
+pub fn nonlinear_transform(ex_rois: &Array2<f32>, gt_rois: &Array2<f32>) -> Array2<f32> {
     assert_eq!(ex_rois.nrows(), gt_rois.nrows(), "inconsistent rois number");
 
     let ex_widths = &ex_rois.slice(s![.., 2]) - &ex_rois.slice(s![.., 0]) + 1.0;
@@ -95,7 +95,7 @@ fn nonlinear_transform(ex_rois: &Array2<f32>, gt_rois: &Array2<f32>) -> Array2<f
     targets
 }
 
-fn nonlinear_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>) -> Array2<f32> {
+pub fn nonlinear_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>) -> Array2<f32> {
     if boxes.nrows() == 0 {
         return Array2::zeros((0, box_deltas.ncols()));
     }
@@ -128,7 +128,7 @@ fn nonlinear_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>) -> Array2<f32> 
 }
 
 
-fn landmark_pred(boxes: &Array2<f32>, point_deltas: &Array2<f32>) -> Array2<f32> {
+pub fn landmark_pred(boxes: &Array2<f32>, point_deltas: &Array2<f32>) -> Array2<f32> {
     if boxes.nrows() == 0 {
         return Array2::zeros((0, point_deltas.ncols()));
     }
@@ -167,7 +167,7 @@ fn landmark_pred(boxes: &Array2<f32>, point_deltas: &Array2<f32>) -> Array2<f32>
     pred_points
 }
 
-fn iou_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>, num_classes: usize) -> Array2<f32> {
+pub fn iou_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>, num_classes: usize) -> Array2<f32> {
     let num_boxes = boxes.shape()[0];
     if num_boxes == 0 {
         return Array2::<f32>::zeros((0, box_deltas.shape()[1]));
@@ -199,7 +199,6 @@ fn iou_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>, num_classes: usize) -
 mod tests {
     use ndarray::{array, ArrayView2};
     use crate::processing::bbox_transform::{clip_boxes, clip_points, landmark_pred, nonlinear_transform, nonlinear_pred, iou_pred};
-    // use crate::rcnn::bbox::bbox_overlaps;
 
     #[test]
     fn test_iou_pred() {
