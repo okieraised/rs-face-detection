@@ -202,10 +202,81 @@ impl TritonInferenceClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::triton_client::client::TritonInferenceClient;
+    use nalgebra::vector;
+    use ndarray_rand::rand_distr::num_traits::FromPrimitive;
+    use crate::triton_client;
+    use crate::triton_client::client::{TritonInferenceClient, RepositoryIndexRequest};
+    use crate::triton_client::client::triton::{InferTensorContents, ModelConfigRequest};
+    use crate::triton_client::client::triton::ModelInferRequest;
+    use crate::triton_client::client::Mat;
+    use crate::triton_client::client::triton::model_infer_request::InferInputTensor;
 
     #[tokio::test]
-    async fn test_new() {
-        let mut client = TritonInferenceClient::new("", "").await;
+    async fn test_repository_index() {
+        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+
+        let models = client
+            .repository_index(RepositoryIndexRequest {
+                repository_name: "".into(),
+                ready: false,
+            }).await.unwrap();
+
+        for model in models.models.iter() {
+            println!("{:?}", model);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_model_config() {
+        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+
+        let models = client
+            .model_config(ModelConfigRequest {
+                name: "face_detection_retina".to_string(),
+                version: "".to_string(),
+            }).await.unwrap();
+
+        let cfg_all = models.config.unwrap();
+
+        for cfg in cfg_all.output.iter() {
+            println!("{:?}", cfg);
+        }
+
+
+    }
+
+    #[tokio::test]
+    async fn test_model_infer() {
+        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+
+        let req = ModelInferRequest {
+            model_name: "face_detection_retina".to_string(),
+            model_version: "".to_string(),
+            id: "".to_string(),
+            parameters: Default::default(),
+            inputs: vec![InferInputTensor {
+                name: "data".to_string(),
+                datatype: "".to_string(),
+                shape: vec![1, 3, 640, 640],
+                parameters: Default::default(),
+                contents: Option::from(InferTensorContents {
+                    bool_contents: vec![],
+                    int_contents: vec![],
+                    int64_contents: vec![],
+                    uint_contents: vec![],
+                    uint64_contents: vec![],
+                    fp32_contents: vec![],
+                    fp64_contents: vec![],
+                    bytes_contents: vec![],
+                }),
+            }],
+            outputs: vec![],
+            raw_input_contents: vec![],
+        };
+
+        let models = client
+            .model_infer(req).await.unwrap();
+
+        println!("{:?}", models.raw_output_contents);
     }
 }

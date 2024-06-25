@@ -1,16 +1,24 @@
-use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, CV_32FC3, CV_32FC1, CV_32F};
-use opencv::imgproc::{INTER_LINEAR, resize, cvt_color, COLOR_BGR2RGB, COLOR_RGBA2RGB, COLOR_BGRA2GRAY};
+use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, CV_32FC3, CV_32FC1, CV_32F, MatTraitConstManual, MatExprTraitConst, copy_to, CV_8UC3, CV_8UC1};
+use opencv::imgproc::{INTER_LINEAR, resize, cvt_color, COLOR_BGR2RGB, COLOR_RGBA2RGB, COLOR_BGRA2GRAY, COLOR_BGR2GRAY};
 use std::collections::HashMap;
 use std::ffi::c_float;
+use std::ops::Mul;
 use crate::processing::generate_anchors::{AnchorConfig, Config, generate_anchors_fpn2};
 use crate::triton_client::client::TritonInferenceClient;
 use anyhow::{Error, Result};
-use ndarray::{Array, Array2, Array3, Array4, Axis, s};
+use bytemuck::cast_slice;
+use image::ImageError::Parameter;
+use ndarray::{Array, Array2, Array3, Array4, Axis, Dim, IntoDimension, s};
+use opencv::imgcodecs::imwrite;
+use opencv::imgproc;
+use opencv::imgproc::ColorConversionCodes::COLOR_GRAY2BGR;
 use opencv::prelude::Boxed;
 use crate::processing::bbox_transform::clip_boxes;
 use crate::processing::nms::nms;
 use crate::rcnn::anchors::anchors;
-use crate::triton_client::client::triton::ModelInferRequest;
+use crate::triton_client::client::triton::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
+use crate::triton_client::client::triton::{InferParameter, InferTensorContents, ModelConfigRequest, ModelInferRequest};
+use crate::triton_client::client::triton::infer_parameter::ParameterChoice;
 
 pub struct RetinaFaceDetection {
     triton_infer_client: TritonInferenceClient,
@@ -22,7 +30,7 @@ pub struct RetinaFaceDetection {
     _feat_stride_fpn: Vec<i32>,
     anchor_cfg: HashMap<String, AnchorConfig>,
     _anchors_fpn: HashMap<String, Array2<f32>>,
-    _num_anchors: HashMap<String, Array2<f32>>,
+    _num_anchors: HashMap<String, usize>,
     pixel_means: Vec<f32>,
     pixel_stds: Vec<f32>,
     pixel_scale: f32,
@@ -92,10 +100,15 @@ impl RetinaFaceDetection {
             .map(|(k, v)| (k.clone(), v))
             .collect::<HashMap<_, _>>();
 
+
+
         let _num_anchors = _anchors_fpn
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.clone().shape()[0]))
             .collect::<HashMap<_, _>>();
+
+        // println!("_anchors_fpn: {:?}", _anchors_fpn);
+        // println!("_num_anchors: {:?}", _num_anchors);
 
         let pixel_means = vec![0.0, 0.0, 0.0];
         let pixel_stds = vec![1.0, 1.0, 1.0];
@@ -149,6 +162,8 @@ impl RetinaFaceDetection {
             Err(e) => return Err(Error::from(e))
         }
 
+        //imwrite("./resized.png", &resized_img, &core::Vector::default()).unwrap();
+
 
         let mut det_img = match Mat::new_rows_cols_with_default(self.image_size.1, self.image_size.0, core::CV_8UC3, Scalar::all(0.0)) {
             Ok(det_img) => det_img,
@@ -157,169 +172,249 @@ impl RetinaFaceDetection {
             }
         };
 
-
-        let mut roi = match Mat::roi(&mut det_img, core::Rect::new(0, 0, new_width, new_height)) {
+        let  mut roi = match Mat::roi_mut(&mut det_img, core::Rect::new(0, 0, new_width, new_height)) {
             Ok(roi) => roi,
             Err(e) => {
                 return Err(Error::from(e))
             }
         };
 
-       match  resized_img.copy_to(&mut roi.clone_pointee()) {
-           Ok(_) => {},
-           Err(e) => {
-               return Err(Error::from(e))
-           }
-       };
+        match  resized_img.copy_to(&mut roi) {
+            Ok(_) => {},
+            Err(e) => {
+                return Err(Error::from(e))
+            }
+        };
+
+        //imwrite("./det_img.png", &det_img, &core::Vector::default()).unwrap();
 
         Ok((det_img, det_scale))
     }
 
 
     pub async fn _forward(&self, img: &Mat) { //  -> Result<(Array2<f32>, Option<Array3<f32>>), Error>
-        // let mut proposals_list = Vec::new();
-        // let mut scores_list = Vec::new();
-        // let mut landmarks_list = Vec::new();
+        let mut im = img.clone();
+        imwrite("./im.png", &im, &core::Vector::default()).unwrap();
 
-        // let mut im = img.clone();
-        let mut temp = img.clone();
+        let im_info = im.size().unwrap();
+        let rows = im_info.height;
+        let cols = im_info.width;
 
-        match img.convert_to(&mut temp, CV_32F, 1.0, 0.0) {
-            Ok(_) => {},
+        print!("{:?} {:?}", &rows, &cols);
+        let mut im_tensor = Array4::<f32>::zeros((1, 3, rows as usize, cols as usize));
+
+        // Convert the image to float and normalize it
+        for i in 0..3 {
+            for y in 0..rows {
+                for x in 0..cols {
+                    let pixel_value = im.at_2d::<core::Vec3b>(y, x).unwrap()[2 - i];
+                    im_tensor[[0, i, y as usize, x as usize]] = (pixel_value as f32 / self.pixel_scale - self.pixel_means[2 - i]) / self.pixel_stds[2 - i];
+                }
+            }
+        }
+
+        // println!("im_tensor {:?}", im_tensor.clone());
+        let vec = im_tensor.into_raw_vec();
+
+        let mut param : HashMap<String,  InferParameter> = HashMap::new();
+        param.insert("max_batch_size".to_string(), InferParameter { parameter_choice: Option::from(ParameterChoice::Int64Param(1)) });
+
+        let models = self.triton_infer_client
+            .model_config(ModelConfigRequest {
+                name: "face_detection_retina".to_string(),
+                version: "".to_string(),
+            }).await.unwrap();
+
+        let cfg = models.config.unwrap();
+
+        let mut cfg_outputs = Vec::<InferRequestedOutputTensor>::new();
+
+        for out_cfg in cfg.output.iter() {
+            cfg_outputs.push(InferRequestedOutputTensor { name: out_cfg.name.to_string(), parameters: Default::default() })
+        }
+
+        println!("out {:?}", &cfg_outputs);
+
+        let model_request = ModelInferRequest{
+            model_name: "face_detection_retina".to_string(),
+            model_version: "".to_string(),
+            id: "".to_string(),
+            parameters: Default::default(),
+            inputs: vec![InferInputTensor {
+                name: "data".to_string(),
+                datatype: "FP32".to_string(),
+                shape: vec![1, 3, 640, 640],
+                parameters: param,
+                contents: Option::from(InferTensorContents {
+                    bool_contents: vec![],
+                    int_contents: vec![],
+                    int64_contents: vec![],
+                    uint_contents: vec![],
+                    uint64_contents: vec![],
+                    fp32_contents: vec,
+                    fp64_contents: vec![],
+                    bytes_contents: vec![],
+                }),
+            }],
+            outputs: cfg_outputs.clone(),
+            raw_input_contents: vec![],
+        };
+
+        let mut model_out = match self.triton_infer_client.model_infer(model_request).await {
+            Ok(model_out) => model_out,
             Err(e) => {
                 println!("{:?}", e);
                 return //Err(Error::from(e))
             }
         };
 
-        // let mut temp = im.clone();
-        let mut im =  Mat::default();
+        let mut net_out: Vec<Array4<f32>> = vec![Array4::zeros([1,1,1,1]); cfg_outputs.len()];
 
-        cvt_color(&mut temp.clone(), &mut im, COLOR_BGRA2GRAY, 0).unwrap();
-        println!("immm {:?}", &im);
+        for (idx, output) in &mut model_out.outputs.iter_mut().enumerate() {
+            let dims = &output.shape;
+            let dimensions: [usize; 4] = [
+                dims[0] as usize,
+                dims[1] as usize,
+                dims[2] as usize,
+                dims[3] as usize,
+            ];
+            let u8_array: &[u8] = &model_out.raw_output_contents[idx];
+            let f_array = u8_to_f32_vec(u8_array);
+            let array4_f32: Array4<f32> = Array4::from_shape_fn(dimensions.into_dimension(), |(_, _, _, idx)| {
+                f_array[idx]
+            });
+            let result_index = cfg_outputs.iter().position(|r| *r.name == output.name).unwrap();
+            net_out.insert(result_index, array4_f32);
+            // println!("out {:?} {:?}", array4_f32, model_out.model_name);
+            // net_out.push(array4_f32);
+        }
 
 
-        let im_info = [im.rows() as f32, im.cols() as f32];
-        let mut im_tensor = Array4::<f32>::zeros((1, 3, im.rows() as usize, im.cols() as usize));
+        // let mut proposals_list = Vec::new();
+        // let mut scores_list = Vec::new();
+        // let mut landmarks_list = Vec::new();
 
-        for i in 0..3 {
-            let channel = (2 - i) as usize;
-            let (mean, std) = (self.pixel_means[channel], self.pixel_stds[channel]);
-            for x in 0..im.rows() {
-                for y in 0..im.cols() {
-                    im_tensor[(0, i, x as usize, y as usize)] = ((im.at_2d::<f32>(x, y).unwrap() / self.pixel_scale - mean) / std);
-                }
+        let mut sym_idx = 0;
+
+        for s in &self._feat_stride_fpn {
+            let stride = *s as usize;
+            // println!("sym_idx {:?}", &net_out[sym_idx + 1]);
+
+
+
+            let mut scores = &net_out[sym_idx];
+
+            // let sliced_scores = scores.slice(s![.., self._num_anchors[&format!("stride{}", stride)].., .., ..]).to_owned();
+            println!("scores {:?}", &scores);
+
+
+            // let mut bbox_deltas = &net_out[sym_idx + 1];
+            //
+            // let height = bbox_deltas.shape()[2];
+            // let width = bbox_deltas.shape()[3];
+
+            // let A = self._num_anchors[&format!("stride{}", stride)];
+            // println!("height, width {:?} {:?}", bbox_deltas.shape(), bbox_deltas.shape());
+            // let K = height * width;
+            // println!("K {:?}", &K);
+            // let anchors_fpn = &self._anchors_fpn[&format!("stride{}", stride)];
+            // let anchor_plane = anchors(height, width, stride, anchors_fpn);
+            // let anchors_shape = anchor_plane.into_shape((K * &A, 4)).unwrap();
+            // println!("anchors_shape {:?}", &anchors_shape);
+            //
+            // let permuted_scores = scores.clone().permuted_axes([0, 2, 3, 1]).unwrap();
+            // println!("permuted_scores {:?}", &permuted_scores);
+            //---------------------------------------------------------------------------------------
+            //     let bbox_deltas = bbox_deltas.permuted_axes([0, 2, 3, 1]);
+            //     let bbox_pred_len = bbox_deltas.dim().3 / &A;
+            //     let bbox_deltas = bbox_deltas.into_shape((-1, bbox_pred_len))?;
+            //
+            //     let mut bbox_deltas = bbox_deltas.to_owned();
+            //     for i in (0..4).step_by(4) {
+            //         bbox_deltas.slice_mut(s![.., i]).mul_assign(self.bbox_stds[i]);
+            //         bbox_deltas.slice_mut(s![.., i + 1]).mul_assign(self.bbox_stds[i + 1]);
+            //         bbox_deltas.slice_mut(s![.., i + 2]).mul_assign(self.bbox_stds[i + 2]);
+            //         bbox_deltas.slice_mut(s![.., i + 3]).mul_assign(self.bbox_stds[i + 3]);
+            //     }
+            //     let proposals = self.bbox_pred(&anchors, &bbox_deltas);
+            //     clip_boxes(proposals, &im_info);
+            //
+            //     let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
+            //     let order: Vec<usize> = scores_ravel.iter().enumerate().filter(|(_, &s)| s >= self.confidence_threshold).map(|(i, _)| i).collect();
+            //     let proposals = proposals.select(Axis(0), &order);
+            //     let scores = scores.select(Axis(0), &order);
+            //
+            //     proposals_list.push(proposals);
+            //     scores_list.push(scores);
+            //
+            //     if self.use_landmarks {
+            //         let landmark_deltas = net_out[sym_idx + 2];
+            //         let landmark_pred_len = landmark_deltas.dim().1 / A;
+            //         let landmark_deltas = landmark_deltas.permuted_axes([0, 2, 3, 1]).into_shape((-1, 5, landmark_pred_len / 5))?;
+            //         let mut landmark_deltas = landmark_deltas.to_owned();
+            //         landmark_deltas *= self.landmark_std;
+            //         let landmarks = self.landmark_pred(&anchors, &landmark_deltas);
+            //         let landmarks = landmarks.select(Axis(0), &order);
+            //         landmarks_list.push(landmarks);
+            //     }
+            //
+            break;
+            if self.use_landmarks {
+                sym_idx += 3;
+            } else {
+                sym_idx += 2;
             }
         }
 
-        println!("{:?}", im_tensor)
 
+            //
+            // let proposals = ndarray::stack(Axis(0), &proposals_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            // let landmarks = if self.use_landmarks {
+            //     let landmarks = ndarray::stack(Axis(0), &landmarks_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            //     Some(landmarks)
+            // } else {
+            //     None
+            // };
+            //
+            // if proposals.is_empty() {
+            //     let landmarks = if self.use_landmarks {
+            //         Some(Array::zeros((0, 5, 2)))
+            //     } else {
+            //         None
+            //     };
+            //     return Ok((Array::zeros((0, 5)), landmarks));
+            // }
+            //
+            // let scores = ndarray::stack(Axis(0), &scores_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            // let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
+            // let order = scores_ravel.into_iter().enumerate().sorted_by(|a, b| b.1.partial_cmp(&a.1).unwrap()).map(|(i, _)| i).collect::<Vec<_>>();
+            // let proposals = proposals.select(Axis(0), &order);
+            // let scores = scores.select(Axis(0), &order);
+            //
+            // let pre_det = ndarray::concatenate![Axis(1), proposals.slice(s![.., ..4]), scores];
+            // let keep = nms(&pre_det, self.iou_threshold);
+            // let det = ndarray::concatenate![Axis(1), pre_det.select(Axis(0), &keep), proposals.slice(s![.., 4..])];
+            // let landmarks = landmarks.map(|landmarks| landmarks.select(Axis(0), &keep));
+            //
+            // Ok((det, landmarks))
 
-        // let model_request = ModelInferRequest{
-        //     model_name: "".to_string(),
-        //     model_version: "".to_string(),
-        //     id: "".to_string(),
-        //     parameters: Default::default(),
-        //     inputs: vec![],
-        //     outputs: vec![],
-        //     raw_input_contents: vec![im_tensor.into_raw_vec()],
-        // };
-        //
-        // let net_out = match self.triton_infer_client.model_infer(model_request).await {
-        //     Ok(net_out) => net_out,
-        //     Err(e) => {
-        //         return Err(Error::from(e))
-        //     }
-        // };
-        //
-        // let mut sym_idx = 0;
-        //
-        // for s in &self._feat_stride_fpn {
-        //     let stride = *s as usize;
-        //     let scores = &net_out.raw_output_contents[sym_idx];
-        //     let bbox_deltas = &net_out.raw_output_contents[sym_idx + 1];
-        //
-        //     let height = bbox_deltas.dim().2;
-        //     let width = bbox_deltas.dim().3;
-        //
-        //     let A = self._num_anchors[&format!("stride{}", stride)].clone().into_raw_vec().to_owned();
-        //     let K = height * width;
-        //     let anchors_fpn = &self._anchors_fpn[&format!("stride{}", stride)];
-        //     let anchors = anchors(height, width, stride, anchors_fpn);
-        //     let anchors = anchors.into_shape((K * &A, 4))?;
-        //
-        //     let scores = scores.permuted_axes([0, 2, 3, 1]).into_shape((-1, 1))?;
-        //     let bbox_deltas = bbox_deltas.permuted_axes([0, 2, 3, 1]);
-        //     let bbox_pred_len = bbox_deltas.dim().3 / &A;
-        //     let bbox_deltas = bbox_deltas.into_shape((-1, bbox_pred_len))?;
-        //
-        //     let mut bbox_deltas = bbox_deltas.to_owned();
-        //     for i in (0..4).step_by(4) {
-        //         bbox_deltas.slice_mut(s![.., i]).mul_assign(self.bbox_stds[i]);
-        //         bbox_deltas.slice_mut(s![.., i + 1]).mul_assign(self.bbox_stds[i + 1]);
-        //         bbox_deltas.slice_mut(s![.., i + 2]).mul_assign(self.bbox_stds[i + 2]);
-        //         bbox_deltas.slice_mut(s![.., i + 3]).mul_assign(self.bbox_stds[i + 3]);
-        //     }
-        //     let proposals = self.bbox_pred(&anchors, &bbox_deltas);
-        //     clip_boxes(proposals, &im_info);
-        //
-        //     let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
-        //     let order: Vec<usize> = scores_ravel.iter().enumerate().filter(|(_, &s)| s >= self.confidence_threshold).map(|(i, _)| i).collect();
-        //     let proposals = proposals.select(Axis(0), &order);
-        //     let scores = scores.select(Axis(0), &order);
-        //
-        //     proposals_list.push(proposals);
-        //     scores_list.push(scores);
-        //
-        //     if self.use_landmarks {
-        //         let landmark_deltas = net_out[sym_idx + 2];
-        //         let landmark_pred_len = landmark_deltas.dim().1 / A;
-        //         let landmark_deltas = landmark_deltas.permuted_axes([0, 2, 3, 1]).into_shape((-1, 5, landmark_pred_len / 5))?;
-        //         let mut landmark_deltas = landmark_deltas.to_owned();
-        //         landmark_deltas *= self.landmark_std;
-        //         let landmarks = self.landmark_pred(&anchors, &landmark_deltas);
-        //         let landmarks = landmarks.select(Axis(0), &order);
-        //         landmarks_list.push(landmarks);
-        //     }
-        //
-        //     if self.use_landmarks {
-        //         sym_idx += 3;
-        //     } else {
-        //         sym_idx += 2;
-        //     }
-        // }
-        //
-        // let proposals = ndarray::stack(Axis(0), &proposals_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-        // let landmarks = if self.use_landmarks {
-        //     let landmarks = ndarray::stack(Axis(0), &landmarks_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-        //     Some(landmarks)
-        // } else {
-        //     None
-        // };
-        //
-        // if proposals.is_empty() {
-        //     let landmarks = if self.use_landmarks {
-        //         Some(Array::zeros((0, 5, 2)))
-        //     } else {
-        //         None
-        //     };
-        //     return Ok((Array::zeros((0, 5)), landmarks));
-        // }
-        //
-        // let scores = ndarray::stack(Axis(0), &scores_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-        // let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
-        // let order = scores_ravel.into_iter().enumerate().sorted_by(|a, b| b.1.partial_cmp(&a.1).unwrap()).map(|(i, _)| i).collect::<Vec<_>>();
-        // let proposals = proposals.select(Axis(0), &order);
-        // let scores = scores.select(Axis(0), &order);
-        //
-        // let pre_det = ndarray::concatenate![Axis(1), proposals.slice(s![.., ..4]), scores];
-        // let keep = nms(&pre_det, self.iou_threshold);
-        // let det = ndarray::concatenate![Axis(1), pre_det.select(Axis(0), &keep), proposals.slice(s![.., 4..])];
-        // let landmarks = landmarks.map(|landmarks| landmarks.select(Axis(0), &keep));
-        //
-        // Ok((det, landmarks))
     }
+}
 
+
+fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
+    v.chunks_exact(4)
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(f32::from_le_bytes)
+        .collect()
+}
+
+fn convert_vecs<T, U>(v: Vec<T>) -> Vec<U>
+    where
+        T: Into<U>,
+{
+    v.into_iter().map(Into::into).collect()
 }
 
 
@@ -354,7 +449,7 @@ mod tests {
     async fn test_preprocess() {
         let retina_face_detection = match RetinaFaceDetection::new(
             "",
-            "8603",
+            "",
             (640, 640),
             1,
             0.7,
@@ -368,7 +463,7 @@ mod tests {
             }
         };
 
-        let im_bytes: &[u8] = include_bytes!("/home/tripg/Documents/repo/rs-faceid-pipeline/test_data/anderson.jpg");
+        let im_bytes: &[u8] = include_bytes!("");
         let image = byte_data_to_opencv(im_bytes).unwrap();
 
         let (preprocessed_img, scale) = retina_face_detection._preprocess(&image).unwrap();
