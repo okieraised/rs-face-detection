@@ -163,7 +163,7 @@ mod tests {
         ];
 
         let face_alignment = FaceAlignment::new((112, 112), standard_landmarks);
-        let image = opencv::imgcodecs::imread("/home/tripg/Documents/repo/rs-faceid-pipeline/test_data/anderson.jpg", opencv::imgcodecs::IMREAD_COLOR).unwrap();
+        let image = opencv::imgcodecs::imread("", opencv::imgcodecs::IMREAD_COLOR).unwrap();
         let bbox = Some(Rect::new(0, 0, 100, 100));
         let landmarks: Vec<[f32; 2]> = vec![
             [30.0, 40.0],

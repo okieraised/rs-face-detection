@@ -1,17 +1,12 @@
-use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, CV_32FC3, CV_32FC1, CV_32F, MatTraitConstManual, MatExprTraitConst, copy_to, CV_8UC3, CV_8UC1};
-use opencv::imgproc::{INTER_LINEAR, resize, cvt_color, COLOR_BGR2RGB, COLOR_RGBA2RGB, COLOR_BGRA2GRAY, COLOR_BGR2GRAY};
+use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, MatTraitConstManual, MatExprTraitConst};
+use opencv::imgproc::{INTER_LINEAR, resize};
 use std::collections::HashMap;
-use std::ffi::c_float;
-use std::ops::Mul;
+use std::ops::{Mul, MulAssign};
 use crate::processing::generate_anchors::{AnchorConfig, Config, generate_anchors_fpn2};
 use crate::triton_client::client::TritonInferenceClient;
 use anyhow::{Error, Result};
-use bytemuck::cast_slice;
-use image::ImageError::Parameter;
-use ndarray::{Array, Array2, Array3, Array4, Axis, Dim, IntoDimension, s};
+use ndarray::{Array, Array2, Array3, Array4, ArrayBase, Axis, concatenate, Dim, IntoDimension, Ix, Ix2, Ix3, OwnedRepr, s, ShapeBuilder};
 use opencv::imgcodecs::imwrite;
-use opencv::imgproc;
-use opencv::imgproc::ColorConversionCodes::COLOR_GRAY2BGR;
 use opencv::prelude::Boxed;
 use crate::processing::bbox_transform::clip_boxes;
 use crate::processing::nms::nms;
@@ -19,6 +14,7 @@ use crate::rcnn::anchors::anchors;
 use crate::triton_client::client::triton::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
 use crate::triton_client::client::triton::{InferParameter, InferTensorContents, ModelConfigRequest, ModelInferRequest};
 use crate::triton_client::client::triton::infer_parameter::ParameterChoice;
+use crate::utils::utils::{argsort_descending, reorder_2d, reorder_3d, vstack_2d, vstack_3d};
 
 pub struct RetinaFaceDetection {
     triton_infer_client: TritonInferenceClient,
@@ -230,10 +226,11 @@ impl RetinaFaceDetection {
         let mut cfg_outputs = Vec::<InferRequestedOutputTensor>::new();
 
         for out_cfg in cfg.output.iter() {
+            // println!("cfg {:?} {:?}", &out_cfg.name, &out_cfg.dims);
             cfg_outputs.push(InferRequestedOutputTensor { name: out_cfg.name.to_string(), parameters: Default::default() })
         }
 
-        println!("out {:?}", &cfg_outputs);
+        // println!("out {:?}", &cfg_outputs);
 
         let model_request = ModelInferRequest{
             model_name: "face_detection_retina".to_string(),
@@ -280,85 +277,148 @@ impl RetinaFaceDetection {
             ];
             let u8_array: &[u8] = &model_out.raw_output_contents[idx];
             let f_array = u8_to_f32_vec(u8_array);
-            let array4_f32: Array4<f32> = Array4::from_shape_fn(dimensions.into_dimension(), |(_, _, _, idx)| {
-                f_array[idx]
-            });
+
+            let array4_f32: Array4<f32> = Array4::from_shape_vec(dimensions.into_dimension(), f_array).unwrap();
             let result_index = cfg_outputs.iter().position(|r| *r.name == output.name).unwrap();
-            net_out.insert(result_index, array4_f32);
+
+            // println!("result_index {:?}", &result_index);
+            net_out[result_index] =  array4_f32;
             // println!("out {:?} {:?}", array4_f32, model_out.model_name);
             // net_out.push(array4_f32);
         }
 
-
-        // let mut proposals_list = Vec::new();
-        // let mut scores_list = Vec::new();
-        // let mut landmarks_list = Vec::new();
+        // println!("net_out {:?} {:?}", &net_out, net_out.len());
+        let mut proposals_list: Vec<Array2<f32>> = Vec::new();
+        let mut scores_list: Vec<Array<f32, Dim<[Ix; 2]>>> = Vec::new();
+        let mut landmarks_list: Vec<Array<f32, Ix3>> = Vec::new();
 
         let mut sym_idx = 0;
 
         for s in &self._feat_stride_fpn {
             let stride = *s as usize;
+            // println!("s: {:?}", stride);
+
             // println!("sym_idx {:?}", &net_out[sym_idx + 1]);
 
 
 
-            let mut scores = &net_out[sym_idx];
+            let mut scores = net_out[sym_idx].to_owned();
+            // println!("scores {:?}",  scores);
+            let sliced_scores = &scores.slice(s![.., self._num_anchors[&format!("stride{}", stride)].., .., ..]).to_owned();
 
-            // let sliced_scores = scores.slice(s![.., self._num_anchors[&format!("stride{}", stride)].., .., ..]).to_owned();
-            println!("scores {:?}", &scores);
+            // println!("scores {:?}",  sliced_scores);
 
 
-            // let mut bbox_deltas = &net_out[sym_idx + 1];
-            //
-            // let height = bbox_deltas.shape()[2];
-            // let width = bbox_deltas.shape()[3];
+            let mut bbox_deltas = net_out[sym_idx + 1].to_owned();
+            println!("bbox_deltas dim {:?}", &bbox_deltas.dim());
 
-            // let A = self._num_anchors[&format!("stride{}", stride)];
-            // println!("height, width {:?} {:?}", bbox_deltas.shape(), bbox_deltas.shape());
-            // let K = height * width;
-            // println!("K {:?}", &K);
-            // let anchors_fpn = &self._anchors_fpn[&format!("stride{}", stride)];
-            // let anchor_plane = anchors(height, width, stride, anchors_fpn);
-            // let anchors_shape = anchor_plane.into_shape((K * &A, 4)).unwrap();
-            // println!("anchors_shape {:?}", &anchors_shape);
-            //
-            // let permuted_scores = scores.clone().permuted_axes([0, 2, 3, 1]).unwrap();
-            // println!("permuted_scores {:?}", &permuted_scores);
-            //---------------------------------------------------------------------------------------
-            //     let bbox_deltas = bbox_deltas.permuted_axes([0, 2, 3, 1]);
-            //     let bbox_pred_len = bbox_deltas.dim().3 / &A;
-            //     let bbox_deltas = bbox_deltas.into_shape((-1, bbox_pred_len))?;
-            //
-            //     let mut bbox_deltas = bbox_deltas.to_owned();
-            //     for i in (0..4).step_by(4) {
-            //         bbox_deltas.slice_mut(s![.., i]).mul_assign(self.bbox_stds[i]);
-            //         bbox_deltas.slice_mut(s![.., i + 1]).mul_assign(self.bbox_stds[i + 1]);
-            //         bbox_deltas.slice_mut(s![.., i + 2]).mul_assign(self.bbox_stds[i + 2]);
-            //         bbox_deltas.slice_mut(s![.., i + 3]).mul_assign(self.bbox_stds[i + 3]);
-            //     }
-            //     let proposals = self.bbox_pred(&anchors, &bbox_deltas);
-            //     clip_boxes(proposals, &im_info);
-            //
-            //     let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
-            //     let order: Vec<usize> = scores_ravel.iter().enumerate().filter(|(_, &s)| s >= self.confidence_threshold).map(|(i, _)| i).collect();
-            //     let proposals = proposals.select(Axis(0), &order);
-            //     let scores = scores.select(Axis(0), &order);
-            //
-            //     proposals_list.push(proposals);
-            //     scores_list.push(scores);
-            //
-            //     if self.use_landmarks {
-            //         let landmark_deltas = net_out[sym_idx + 2];
-            //         let landmark_pred_len = landmark_deltas.dim().1 / A;
-            //         let landmark_deltas = landmark_deltas.permuted_axes([0, 2, 3, 1]).into_shape((-1, 5, landmark_pred_len / 5))?;
-            //         let mut landmark_deltas = landmark_deltas.to_owned();
-            //         landmark_deltas *= self.landmark_std;
-            //         let landmarks = self.landmark_pred(&anchors, &landmark_deltas);
-            //         let landmarks = landmarks.select(Axis(0), &order);
-            //         landmarks_list.push(landmarks);
-            //     }
-            //
-            break;
+            // println!("bbox_deltas {:?}", &bbox_deltas);
+
+            let height = bbox_deltas.shape()[2];
+            let width = bbox_deltas.shape()[3];
+
+            let A = self._num_anchors[&format!("stride{}", stride)];
+            let K = height * width;
+            // println!("height, width {:?} {:?}", &bbox_deltas.shape(), &bbox_deltas.shape());
+            println!("K {:?}", &K);
+
+
+            let anchors_fpn = &self._anchors_fpn[&format!("stride{}", stride)];
+            let anchor_plane = anchors(height, width, stride, anchors_fpn);
+            // println!("anchor_plane {:?}", &anchor_plane);
+            let anchors_reshape = anchor_plane.into_shape((K * &A, 4)).unwrap();
+            // println!("anchors_reshape {:?}", &anchors_reshape);
+
+            let transposed_scores = sliced_scores.clone().permuted_axes([0, 2, 3, 1]);
+            let scores_shape = transposed_scores.shape();
+            let mut scores_dim: usize = 1;
+            for dim in scores_shape {
+                scores_dim *= dim;
+            }
+            let flattened_scores: Vec<f32> = transposed_scores.iter().cloned().collect();
+            let arr_scores = Array::from(flattened_scores);
+            // Calculate the new shape for reshaping
+            // Reshape the array to (-1, 1)
+            let reshaped_scores = arr_scores.into_shape((scores_dim, 1)).unwrap();
+            // println!("reshaped_scores {:?}", &reshaped_scores);
+
+            let bbox_deltas_transposed = bbox_deltas.permuted_axes([0, 2, 3, 1]);
+            // println!("bbox_deltas {:?}", &bbox_deltas);
+
+            let bbox_pred_len = bbox_deltas_transposed.dim().3 / &A;
+            println!("bbox_pred_len {:?}", &bbox_pred_len);
+
+
+            let bbox_deltas_shape = bbox_deltas_transposed.shape();
+            println!("bbox_deltas_shape {:?}", &bbox_deltas_shape);
+
+            let mut bbox_deltas_dim: usize = 1;
+            for dim in bbox_deltas_shape {
+                bbox_deltas_dim *= dim;
+            }
+
+            let flattened_bbox_deltas: Vec<f32> = bbox_deltas_transposed.iter().cloned().collect();
+            let arr_bbox_deltas = Array::from(flattened_bbox_deltas);
+            // println!("len arr_bbox_deltas {:?}", &arr_bbox_deltas.len());
+
+            let mut bbox_deltas_reshaped = arr_bbox_deltas.into_shape(((bbox_deltas_dim) / &bbox_pred_len, bbox_pred_len)).unwrap();
+            // println!("bbox_deltas_reshaped {:?}", &bbox_deltas_reshaped);
+
+            for i in (0..4).step_by(4) {
+                bbox_deltas_reshaped.slice_mut(s![.., i]).mul_assign(self.bbox_stds[i]);
+                bbox_deltas_reshaped.slice_mut(s![.., i + 1]).mul_assign(self.bbox_stds[i + 1]);
+                bbox_deltas_reshaped.slice_mut(s![.., i + 2]).mul_assign(self.bbox_stds[i + 2]);
+                bbox_deltas_reshaped.slice_mut(s![.., i + 3]).mul_assign(self.bbox_stds[i + 3]);
+            }
+            // println!("bbox_deltas_reshaped {:?}", &bbox_deltas_reshaped);
+
+            let mut proposals = self.bbox_pred(anchors_reshape.clone(), bbox_deltas_reshaped.to_owned());
+            // println!("proposals {:?}", &proposals);
+            // println!("im_info {:?}", &im_info);
+            clip_boxes(&mut proposals, (im_info.height as usize, im_info.width as usize));
+            // println!("clip_boxes {:?}", &proposals);
+
+            let scores_ravel = reshaped_scores.view().iter().copied().collect::<Vec<_>>();
+            // println!("scores_ravel {:?}", &scores_ravel);
+            let order: Vec<usize> = scores_ravel.iter().enumerate().filter(|(_, &s)| s >= self.confidence_threshold).map(|(i, _)| i).collect();
+            // println!("order {:?}", &order);
+            let selected_proposals = proposals.select(Axis(0), &order);
+            // println!("proposals {:?}", &selected_proposals);
+            let selected_scores = reshaped_scores.select(Axis(0), &order);
+            // println!("selected_scores {:?}", &selected_scores);
+
+            proposals_list.push(selected_proposals);
+            scores_list.push(selected_scores);
+
+            if self.use_landmarks {
+                let landmark_deltas = net_out[sym_idx + 2].to_owned();
+                // println!("landmark_deltas {:?}", &landmark_deltas);
+                let landmark_pred_len = landmark_deltas.dim().1 / A;
+                // println!("landmark_pred_len {:?}", &landmark_pred_len);
+                let transposed_landmark_deltas = &landmark_deltas.permuted_axes([0, 2, 3, 1]);
+
+                let landmark_deltas_shape = transposed_landmark_deltas.shape();
+                let mut landmark_deltas_dim: usize = 1;
+                for dim in landmark_deltas_shape {
+                    landmark_deltas_dim *= dim;
+                }
+
+                let flattened_landmark_deltas: Vec<f32> = transposed_landmark_deltas.iter().cloned().collect();
+                let arr_landmark_deltas = Array::from(flattened_landmark_deltas);
+                let mut reshaped_landmark_deltas = arr_landmark_deltas.into_shape((landmark_deltas_dim / landmark_pred_len, 5, landmark_pred_len / 5)).unwrap();
+                // println!("reshaped_landmark_deltas {:?}", &reshaped_landmark_deltas);
+
+                reshaped_landmark_deltas *= self.landmark_std;
+                // println!("reshaped_landmark_deltas {:?}", &reshaped_landmark_deltas);
+
+                let landmarks = self.landmark_pred(anchors_reshape, reshaped_landmark_deltas);
+                // println!("landmarks {:?}", &landmarks);
+                let selected_landmarks = landmarks.select(Axis(0), &order);
+                // println!("selected_landmarks {:?}", &selected_landmarks);
+                landmarks_list.push(selected_landmarks);
+            }
+
+            // break;
             if self.use_landmarks {
                 sym_idx += 3;
             } else {
@@ -366,38 +426,146 @@ impl RetinaFaceDetection {
             }
         }
 
+        // println!("proposals_list {:?}", &proposals_list);
+        let proposals = vstack_2d(proposals_list);
 
-            //
-            // let proposals = ndarray::stack(Axis(0), &proposals_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            // let landmarks = if self.use_landmarks {
-            //     let landmarks = ndarray::stack(Axis(0), &landmarks_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            //     Some(landmarks)
-            // } else {
-            //     None
-            // };
-            //
-            // if proposals.is_empty() {
-            //     let landmarks = if self.use_landmarks {
-            //         Some(Array::zeros((0, 5, 2)))
-            //     } else {
-            //         None
-            //     };
-            //     return Ok((Array::zeros((0, 5)), landmarks));
-            // }
-            //
-            // let scores = ndarray::stack(Axis(0), &scores_list.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            // let scores_ravel = scores.view().iter().copied().collect::<Vec<_>>();
-            // let order = scores_ravel.into_iter().enumerate().sorted_by(|a, b| b.1.partial_cmp(&a.1).unwrap()).map(|(i, _)| i).collect::<Vec<_>>();
-            // let proposals = proposals.select(Axis(0), &order);
-            // let scores = scores.select(Axis(0), &order);
-            //
-            // let pre_det = ndarray::concatenate![Axis(1), proposals.slice(s![.., ..4]), scores];
-            // let keep = nms(&pre_det, self.iou_threshold);
-            // let det = ndarray::concatenate![Axis(1), pre_det.select(Axis(0), &keep), proposals.slice(s![.., 4..])];
-            // let landmarks = landmarks.map(|landmarks| landmarks.select(Axis(0), &keep));
-            //
-            // Ok((det, landmarks))
+        let mut landmarks: Option<Array3<f32>> = None;
 
+        // println!("proposals {:?}", &proposals);
+        // println!("proposals.dim()[0] {:?}", &proposals.dim().0);
+        if proposals.dim().0 == 0 {
+            if self.use_landmarks {
+                let det: Array2<f32> = Array2::zeros((0, 5));
+                landmarks = Some(Array3::zeros((0, 5, 2)));
+                //return Ok((det, landmarks));
+            }
+        }
+
+        let score_stack = vstack_2d(scores_list);
+        // println!("score_stack {:?}", &score_stack);
+        let score_stack_ravel = score_stack.view().iter().copied().collect::<Vec<_>>();
+        // println!("score_stack_ravel {:?}", &score_stack_ravel);
+
+        let order = argsort_descending(&score_stack_ravel);
+        // println!("order {:?}", &order);
+
+        let selected_proposals = reorder_2d(proposals, &order);
+        // println!("selected_proposals {:?}", &selected_proposals);
+
+        let selected_score = reorder_2d(score_stack, &order);
+        // println!("selected_score {:?}", &selected_score);
+
+        if self.use_landmarks {
+            let landmarks_stack = vstack_3d(landmarks_list);
+            // println!("landmarks_stack {:?}", &landmarks_stack);
+
+            landmarks = Some(reorder_3d(landmarks_stack, &order));
+            // println!("selected_landmarks {:?}", &selected_landmarks);
+        }
+
+
+        let pre_det = concatenate![Axis(1), selected_proposals.slice(s![.., 0..4]).to_owned(), selected_score];
+        // println!("pre_det {:?}", &pre_det);
+
+        let keep = nms(&pre_det, self.iou_threshold);
+        // println!("keep {:?}", &keep);
+
+        let mut det = concatenate![Axis(1), pre_det, selected_proposals.slice(s![.., 4..]).to_owned()];
+        // println!("det {:?}", &det);
+
+
+
+
+        let selected_rows = &keep.iter()
+            .map(|&i| det.slice(s![i, ..]).to_owned())
+            .collect::<Vec<_>>();
+
+        let new_det_shape = (selected_rows.len(), det.shape()[1]);
+
+
+        // println!("det {:?}", &det);
+
+        let det = Array2::from_shape_vec(
+            new_det_shape,
+            selected_rows.into_iter().flat_map(| row| row.iter().cloned()).collect()
+        ).unwrap();
+
+        println!("det_selected {:?}", &det);
+
+        if self.use_landmarks {
+            let selected_landmarks = &keep.iter()
+                .map(|&i| landmarks.clone().unwrap().slice(s![i, .., ..]).to_owned())
+                .collect::<Vec<_>>();
+
+            // Convert the vector of arrays back into a 3D array
+            let new_landmarks_shape = (selected_landmarks.len(), landmarks.clone().unwrap().shape()[1], landmarks.clone().unwrap().shape()[2]);
+            landmarks = Some(Array3::from_shape_vec(
+                new_landmarks_shape,
+                selected_landmarks.into_iter().flat_map(|array| array.iter().cloned()).collect()
+            ).unwrap());
+
+
+            println!("landmarks {:?}", &landmarks);
+        }
+        // Ok((det, landmarks))
+
+    }
+
+
+    fn bbox_pred(&self, boxes: ArrayBase<OwnedRepr<f32>, Ix2>, box_deltas: ArrayBase<OwnedRepr<f32>, Ix2>) -> Array2<f32> {
+        if boxes.shape()[0] == 0 {
+            return Array2::zeros((0, box_deltas.shape()[1]));
+        }
+
+        let boxes = boxes.mapv(|x| x as f32);
+        let widths = &boxes.slice(s![.., 2]) - &boxes.slice(s![.., 0]) + 1.0;
+        let heights = &boxes.slice(s![.., 3]) - &boxes.slice(s![.., 1]) + 1.0;
+        let ctr_x = &boxes.slice(s![.., 0]) + 0.5 * (&widths - 1.0);
+        let ctr_y = &boxes.slice(s![.., 1]) + 0.5 * (&heights - 1.0);
+
+        let dx = box_deltas.slice(s![.., 0..1]);
+        let dy = box_deltas.slice(s![.., 1..2]);
+        let dw = box_deltas.slice(s![.., 2..3]);
+        let dh = box_deltas.slice(s![.., 3..4]);
+
+        let pred_ctr_x = &dx * &widths.clone().insert_axis(Axis(1)) + &ctr_x.insert_axis(Axis(1));
+        let pred_ctr_y = &dy * &heights.clone().insert_axis(Axis(1)) + &ctr_y.insert_axis(Axis(1));
+        let pred_w = dw.mapv(f32::exp) * &widths.insert_axis(Axis(1));
+        let pred_h = dh.mapv(f32::exp) * &heights.insert_axis(Axis(1));
+
+        let mut pred_boxes = Array2::<f32>::zeros(box_deltas.raw_dim());
+
+        pred_boxes.slice_mut(s![.., 0..1]).assign(&(&pred_ctr_x - 0.5 * (&pred_w - 1.0)));
+        pred_boxes.slice_mut(s![.., 1..2]).assign(&(&pred_ctr_y - 0.5 * (&pred_h - 1.0)));
+        pred_boxes.slice_mut(s![.., 2..3]).assign(&(&pred_ctr_x + 0.5 * (&pred_w - 1.0)));
+        pred_boxes.slice_mut(s![.., 3..4]).assign(&(&pred_ctr_y + 0.5 * (&pred_h - 1.0)));
+
+        if box_deltas.shape()[1] > 4 {
+            pred_boxes.slice_mut(s![.., 4..]).assign(&box_deltas.slice(s![.., 4..]));
+        }
+
+        pred_boxes
+    }
+
+    fn landmark_pred(&self, boxes: ArrayBase<OwnedRepr<f32>, Ix2>, landmark_deltas: ArrayBase<OwnedRepr<f32>, Ix3>) -> ArrayBase<OwnedRepr<f32>, Ix3> {
+        if boxes.shape()[0] == 0 {
+            return Array3::zeros((0, landmark_deltas.shape()[1], landmark_deltas.shape()[2]));
+        }
+
+        let boxes = boxes.mapv(|x| x as f32);
+        let widths = &boxes.slice(s![.., 2]) - &boxes.slice(s![.., 0]) + 1.0;
+        let heights = &boxes.slice(s![.., 3]) - &boxes.slice(s![.., 1]) + 1.0;
+        let ctr_x = &boxes.slice(s![.., 0]) + 0.5 * (&widths - 1.0);
+        let ctr_y = &boxes.slice(s![.., 1]) + 0.5 * (&heights - 1.0);
+
+        let mut pred = landmark_deltas.clone();
+
+        for i in 0..5 {
+            pred.slice_mut(s![.., i, 0]).assign(&(&landmark_deltas.slice(s![.., i, 0]) * &widths + &ctr_x));
+            pred.slice_mut(s![.., i, 1]).assign(&(&landmark_deltas.slice(s![.., i, 1]) * &heights + &ctr_y));
+        }
+
+        pred
     }
 }
 
