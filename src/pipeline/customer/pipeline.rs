@@ -1,3 +1,5 @@
+use ndarray::Array2;
+
 #[derive(Debug)]
 enum FaceQualityClass {
     Bad = 0,
@@ -31,22 +33,22 @@ impl RetinaFaceDetectionConfig {
 
 
 #[derive(Debug)]
-struct FaceAlignConfig {
+struct FaceAlignmentConfig {
     image_size: (u32, u32),
-    standard_landmarks: Vec<[f32; 2]>,
+    standard_landmarks: Array2<f32>,
 }
 
-impl FaceAlignConfig {
+impl FaceAlignmentConfig {
     fn new() -> Self {
-        FaceAlignConfig {
+        FaceAlignmentConfig {
             image_size: (112, 112),
-            standard_landmarks: vec![
+            standard_landmarks: Array2::from(vec![
                 [38.2946, 51.6963],
                 [73.5318, 51.5014],
                 [56.0252, 71.7366],
                 [41.5493, 92.3655],
                 [70.7299, 92.2041],
-            ],
+            ]),
         }
     }
 }

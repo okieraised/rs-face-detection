@@ -1,4 +1,4 @@
-use opencv::core::{self, Mat, MatTraitConst};
+use opencv::core::{self, Mat, MatTrait, MatTraitConst, Scalar};
 use opencv::imgcodecs::{imdecode, IMREAD_UNCHANGED};
 use opencv::imgproc::{cvt_color, COLOR_RGBA2RGB, COLOR_GRAY2RGB};
 use anyhow::{Error, Result};
@@ -49,25 +49,6 @@ pub fn byte_data_to_opencv(im_bytes: &[u8]) -> Result<Mat, Error> {
 
     Ok(opencv_img)
 }
-
-// pub fn select_rows(det: &mut Array2<f32>, keep: &[usize]) {
-//     let mut indices_to_keep = keep.iter().cloned().collect::<Vec<usize>>();
-//
-//     // Sort indices if they are not already sorted
-//     indices_to_keep.sort();
-//
-//     // Create a view of the selected rows
-//     let selected_rows = det.slice_mut(s![indices_to_keep, ..]);
-//
-//     // Optionally, if you want to copy the selected rows to a new array, use:
-//     // let selected_rows = det.select(Axis(0), &indices_to_keep);
-//
-//     // Modify selected_rows if necessary
-//     // selected_rows *= 2.0; // Example modification
-//
-//     // Alternatively, if you want to keep only the selected rows:
-//     // let det = det.select(Axis(0), &indices_to_keep);
-// }
 
 pub fn vstack_2d(v: Vec<ArrayBase<OwnedRepr<f32>, Ix2>>) -> Array2<f32> {
     // Check if proposals_list is empty
@@ -139,6 +120,28 @@ pub fn reorder_3d(v: Array3<f32>, order: &Vec<usize>) -> Array3<f32> {
     }
 
     reordered_v
+}
+
+pub fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
+    v.chunks_exact(4)
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(f32::from_le_bytes)
+        .collect()
+}
+
+pub fn array2_to_mat(arr: &Array2<f32>) -> opencv::Result<Mat> {
+    let rows = arr.shape()[0] as i32;
+    let cols = arr.shape()[1] as i32;
+    let mut mat = Mat::new_rows_cols_with_default(rows, cols, core::CV_32F, Scalar::all(0.0))?;
+
+    for (i, row) in arr.outer_iter().enumerate() {
+        for (j, val) in row.iter().enumerate() {
+            *mat.at_2d_mut::<f32>(i as i32, j as i32)? = *val;
+        }
+    }
+
+    Ok(mat)
 }
 
 
