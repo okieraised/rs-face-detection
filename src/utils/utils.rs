@@ -3,6 +3,7 @@ use opencv::imgcodecs::{imdecode, IMREAD_UNCHANGED};
 use opencv::imgproc::{cvt_color, COLOR_RGBA2RGB, COLOR_GRAY2RGB};
 use anyhow::{Error, Result};
 use ndarray::{Array, Array2, Array3, ArrayBase, Axis, concatenate, Ix2, Ix3, OwnedRepr, s, stack};
+use ndarray_linalg::Norm;
 
 pub fn byte_data_to_opencv(im_bytes: &[u8]) -> Result<Mat, Error> {
     // Convert bytes to Mat
@@ -143,6 +144,15 @@ pub fn array2_to_mat(arr: &Array2<f32>) -> opencv::Result<Mat> {
 
     Ok(mat)
 }
+
+pub fn normalize_outputs(outputs: Vec<Vec<Array2<f32>>>) -> Vec<Array2<f32>> {
+    outputs.iter().map(|outer| {
+        let array = &outer[0];
+        let norm = array.norm_l2();
+        array / norm
+    }).collect()
+}
+
 
 
 #[cfg(test)]

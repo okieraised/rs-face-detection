@@ -1,23 +1,26 @@
-use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, MatTraitConstManual, MatExprTraitConst};
+use opencv::core::{self, Mat, MatTraitConst, Scalar, Size};
 use opencv::imgproc::{INTER_LINEAR, resize};
 use std::collections::HashMap;
-use std::ops::{Deref, Mul, MulAssign};
+use std::ops::{MulAssign};
 use crate::processing::generate_anchors::{AnchorConfig, Config, generate_anchors_fpn2};
 use crate::triton_client::client::TritonInferenceClient;
 use anyhow::{Error, Result};
-use ndarray::{Array, Array2, Array3, Array4, ArrayBase, Axis, concatenate, Dim, IntoDimension, Ix, Ix2, Ix3, Ix4, OwnedRepr, s, ShapeBuilder};
+use ndarray::{Array, Array2, Array3, Array4, ArrayBase, Axis, concatenate, Dim, IntoDimension, Ix, Ix2, Ix3, OwnedRepr, s};
 use opencv::imgcodecs::imwrite;
-use opencv::prelude::Boxed;
 use crate::processing::bbox_transform::clip_boxes;
 use crate::processing::nms::nms;
 use crate::rcnn::anchors::anchors;
 use crate::triton_client::client::triton::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
-use crate::triton_client::client::triton::{InferParameter, InferTensorContents, ModelConfig, ModelConfigRequest, ModelInferRequest};
+use crate::triton_client::client::triton::{InferParameter, InferTensorContents, ModelConfigRequest, ModelConfigResponse, ModelInferRequest};
 use crate::triton_client::client::triton::infer_parameter::ParameterChoice;
 use crate::utils::utils::{argsort_descending, reorder_2d, reorder_3d, u8_to_f32_vec, vstack_2d, vstack_3d};
 
+#[derive(Debug)]
 pub struct RetinaFaceDetection {
     triton_infer_client: TritonInferenceClient,
+    triton_model_config: ModelConfigResponse,
+    model_name: String,
+    max_batch_size: i32,
     image_size: (i32, i32),
     use_landmarks: bool,
     confidence_threshold: f32,
@@ -36,19 +39,14 @@ pub struct RetinaFaceDetection {
 
 impl RetinaFaceDetection {
     pub async fn new(
-        triton_host: &str,
-        triton_port: &str,
+        triton_infer_client: TritonInferenceClient,
+        triton_model_config: ModelConfigResponse,
+        model_name: String,
         image_size: (i32, i32),
         max_batch_size: i32,
         confidence_threshold: f32,
         iou_threshold: f32,
     ) -> Result<Self, Error> {
-        let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
-            Ok(triton_infer_client) => triton_infer_client,
-            Err(e) => {
-                return Err(Error::from(e))
-            }
-        };
 
         let mut fpn_keys = vec![];
         let _feat_stride_fpn = vec![32, 16, 8];
@@ -110,6 +108,8 @@ impl RetinaFaceDetection {
 
         Ok(RetinaFaceDetection {
             triton_infer_client,
+            triton_model_config,
+            model_name,
             image_size,
             use_landmarks,
             confidence_threshold,
@@ -124,10 +124,11 @@ impl RetinaFaceDetection {
             pixel_scale,
             bbox_stds,
             landmark_std,
+            max_batch_size,
         })
     }
 
-    pub fn _preprocess(&self, img: &Mat, is_debug: Option<bool>) -> Result<(Mat, f32), Error> {
+    fn _preprocess(&self, img: &Mat, is_debug: Option<bool>) -> Result<(Mat, f32), Error> {
 
         let debug = is_debug.unwrap_or(false);
 
@@ -150,7 +151,6 @@ impl RetinaFaceDetection {
         };
 
         let det_scale = new_height as f32 / img_shape.height as f32;
-
         let mut resized_img = Mat::default();
 
         match resize(&img, &mut resized_img, Size::new(new_width, new_height), 0.0, 0.0, INTER_LINEAR) {
@@ -198,7 +198,7 @@ impl RetinaFaceDetection {
     }
 
 
-    pub async fn _forward(&self, img: &Mat, is_debug: Option<bool>) -> Result<(Array2<f32>, Option<Array3<f32>>), Error> {
+    async fn _forward(&self, img: &Mat, is_debug: Option<bool>) -> Result<(Array2<f32>, Option<Array3<f32>>), Error> {
 
         let debug = is_debug.unwrap_or(false);
         let mut im = img.clone();
@@ -214,13 +214,8 @@ impl RetinaFaceDetection {
             Ok(im_info) => {im_info}
             Err(e) => return Err(Error::from(e))
         };
-
         let rows = im_info.height;
         let cols = im_info.width;
-
-        if debug {
-            print!("image info - rows: {:?} | cols: {:?}", &rows, &cols);
-        }
 
         let mut im_tensor = Array4::<f32>::zeros((1, 3, rows as usize, cols as usize));
 
@@ -234,27 +229,14 @@ impl RetinaFaceDetection {
             }
         }
 
-        if debug {
-            println!("im_tensor: {:?}", im_tensor.clone());
-        }
-
         let vec = im_tensor.into_raw_vec();
 
         let mut param : HashMap<String,  InferParameter> = HashMap::new();
-        param.insert("max_batch_size".to_string(), InferParameter { parameter_choice: Option::from(ParameterChoice::Int64Param(1)) });
+        param.insert("max_batch_size".to_string(), InferParameter { parameter_choice: Option::from(ParameterChoice::Int64Param(self.max_batch_size as i64)) });
 
-        let model_config_resp = match self.triton_infer_client
-            .model_config(ModelConfigRequest {
-                name: "face_detection_retina".to_string(),
-                version: "".to_string(),
-            }).await {
-            Ok(model_config_resp) => {model_config_resp}
-            Err(e) => return Err(Error::from(e))
-        };
-
-        let model_cfg = match model_config_resp.config {
+        let model_cfg = match &self.triton_model_config.config {
             None => {
-                return Err(Error::msg("model config is empty"))
+                return Err(Error::msg("face detection model config is empty"))
             }
             Some(model_cfg) => {model_cfg}
         };
@@ -268,15 +250,16 @@ impl RetinaFaceDetection {
             })
         }
 
+
         let model_request = ModelInferRequest{
-            model_name: "face_detection_retina".to_string(),
+            model_name: self.model_name.to_owned(),
             model_version: "".to_string(),
             id: "".to_string(),
             parameters: Default::default(),
             inputs: vec![InferInputTensor {
-                name: "data".to_string(),
-                datatype: "FP32".to_string(),
-                shape: vec![1, 3, 640, 640],
+                name: model_cfg.input[0].name.to_string(),
+                datatype: model_cfg.input[0].data_type().as_str_name()[5..].to_uppercase(),
+                shape: model_cfg.input[0].dims.to_owned(),
                 parameters: param,
                 contents: Option::from(InferTensorContents {
                     bool_contents: vec![],
@@ -289,7 +272,7 @@ impl RetinaFaceDetection {
                     bytes_contents: vec![],
                 }),
             }],
-            outputs: cfg_outputs.clone(),
+            outputs: Default::default(),
             raw_input_contents: vec![],
         };
 
@@ -327,9 +310,6 @@ impl RetinaFaceDetection {
             };
             net_out[result_index] =  array4_f32;
         }
-        if debug {
-            println!("net_out {:?} {:?}", &net_out, net_out.len());
-        }
 
         let mut proposals_list: Vec<Array2<f32>> = Vec::new();
         let mut scores_list: Vec<Array<f32, Dim<[Ix; 2]>>> = Vec::new();
@@ -338,16 +318,16 @@ impl RetinaFaceDetection {
 
         for s in &self._feat_stride_fpn {
             let stride = *s as usize;
-            let mut scores = net_out[sym_idx].to_owned();
+            let scores = net_out[sym_idx].to_owned();
             let sliced_scores = &scores.slice(s![.., self._num_anchors[&format!("stride{}", stride)].., .., ..]).to_owned();
-            let mut bbox_deltas = net_out[sym_idx + 1].to_owned();
+            let bbox_deltas = net_out[sym_idx + 1].to_owned();
             let height = bbox_deltas.shape()[2];
             let width = bbox_deltas.shape()[3];
-            let A = self._num_anchors[&format!("stride{}", stride)];
-            let K = height * width;
+            let a = self._num_anchors[&format!("stride{}", stride)];
+            let k = height * width;
             let anchors_fpn = &self._anchors_fpn[&format!("stride{}", stride)];
             let anchor_plane = anchors(height, width, stride, anchors_fpn);
-            let anchors_reshape = match anchor_plane.into_shape((K * &A, 4)) {
+            let anchors_reshape = match anchor_plane.into_shape((k * &a, 4)) {
                 Ok(anchors_reshape) => {anchors_reshape}
                 Err(e) => {
                     return Err(Error::from(e))
@@ -368,7 +348,7 @@ impl RetinaFaceDetection {
                 }
             };
             let transposed_bbox_deltas = bbox_deltas.permuted_axes([0, 2, 3, 1]);
-            let bbox_pred_len = transposed_bbox_deltas.dim().3 / &A;
+            let bbox_pred_len = transposed_bbox_deltas.dim().3 / &a;
             let bbox_deltas_shape = transposed_bbox_deltas.shape();
             let mut bbox_deltas_dim: usize = 1;
             for dim in bbox_deltas_shape {
@@ -389,41 +369,18 @@ impl RetinaFaceDetection {
                 bbox_deltas_reshaped.slice_mut(s![.., i + 2]).mul_assign(self.bbox_stds[i + 2]);
                 bbox_deltas_reshaped.slice_mut(s![.., i + 3]).mul_assign(self.bbox_stds[i + 3]);
             }
-            if debug {
-                println!("bbox_deltas_reshaped {:?}", &bbox_deltas_reshaped);
-            }
             let mut proposals = self.bbox_pred(anchors_reshape.clone(), bbox_deltas_reshaped.to_owned());
-            if debug {
-                println!("proposals {:?}", &proposals);
-            }
             clip_boxes(&mut proposals, (im_info.height as usize, im_info.width as usize));
-            if debug {
-                println!("proposals {:?}", &proposals);
-            }
             let scores_flatten = reshaped_scores.view().iter().copied().collect::<Vec<_>>();
-            if debug {
-                println!("scores_flatten {:?}", &scores_flatten);
-            }
             let order: Vec<usize> = scores_flatten.iter().enumerate().filter(|(_, &s)| s >= self.confidence_threshold).map(|(i, _)| i).collect();
-            if debug {
-                println!("order {:?}", &order);
-            }
-            //
             let selected_proposals = proposals.select(Axis(0), &order);
-            if debug {
-                println!("selected_proposals {:?}", &selected_proposals);
-            }
             let selected_scores = reshaped_scores.select(Axis(0), &order);
-            if debug {
-                println!("selected_scores {:?}", &selected_scores);
-            }
-
             proposals_list.push(selected_proposals);
             scores_list.push(selected_scores);
 
             if self.use_landmarks {
                 let landmark_deltas = net_out[sym_idx + 2].to_owned();
-                let landmark_pred_len = landmark_deltas.dim().1 / A;
+                let landmark_pred_len = landmark_deltas.dim().1 / a;
                 let transposed_landmark_deltas = &landmark_deltas.permuted_axes([0, 2, 3, 1]);
                 let landmark_deltas_shape = transposed_landmark_deltas.shape();
                 let mut landmark_deltas_dim: usize = 1;
@@ -442,9 +399,6 @@ impl RetinaFaceDetection {
                 let landmarks = self.landmark_pred(anchors_reshape, reshaped_landmark_deltas);
                 let selected_landmarks = landmarks.select(Axis(0), &order);
                 landmarks_list.push(selected_landmarks);
-                if debug {
-                    println!("landmarks_list {:?}", &landmarks_list);
-                }
             }
             if self.use_landmarks {
                 sym_idx += 3;
@@ -467,35 +421,15 @@ impl RetinaFaceDetection {
         let score_stack = vstack_2d(scores_list);
         let score_flatten = score_stack.view().iter().copied().collect::<Vec<_>>();
         let order = argsort_descending(&score_flatten);
-        if debug {
-            println!("order {:?}", &order);
-        }
         let selected_proposals = reorder_2d(proposals, &order);
-        if debug {
-            println!("selected_proposals {:?}", &selected_proposals);
-        }
-
         let selected_score = reorder_2d(score_stack, &order);
-        if debug {
-            println!("selected_score {:?}", &selected_score);
-        }
-
         if self.use_landmarks {
             let landmarks_stack = vstack_3d(landmarks_list);
             landmarks = Some(reorder_3d(landmarks_stack, &order));
         }
-
         let pre_det = concatenate![Axis(1), selected_proposals.slice(s![.., 0..4]).to_owned(), selected_score];
-        if debug {
-            println!("pre_det {:?}", &pre_det);
-        }
-
         let keep = nms(&pre_det, self.iou_threshold);
-        if debug {
-            println!("keep {:?}", &keep);
-        }
-
-        let mut det = concatenate![Axis(1), pre_det, selected_proposals.slice(s![.., 4..]).to_owned()];
+        let det = concatenate![Axis(1), pre_det, selected_proposals.slice(s![.., 4..]).to_owned()];
         let selected_rows = &keep.iter()
             .map(|&i| det.slice(s![i, ..]).to_owned())
             .collect::<Vec<_>>();
@@ -532,15 +466,11 @@ impl RetinaFaceDetection {
                 println!("landmarks: {:?}", &landmarks);
                 println!("det: {:?}", &det);
             }
-            // println!("landmarks: {:?}", &landmarks);
-            // println!("det: {:?}", &det);
-
         }
-
         Ok((det, landmarks))
     }
 
-    pub async fn _postprocess(&self, predicted_output: (Array2<f32>, Option<Array3<f32>>), preprocess_param: f32, is_debug: Option<bool>) -> (Array2<f32>, Option<Array3<f32>>)  {
+    async fn _postprocess(&self, predicted_output: (Array2<f32>, Option<Array3<f32>>), preprocess_param: f32, is_debug: Option<bool>) -> (Array2<f32>, Option<Array3<f32>>)  {
 
         let debug = is_debug.unwrap_or(false);
         let (mut det, mut kpss) = predicted_output;
@@ -549,21 +479,37 @@ impl RetinaFaceDetection {
                 *elem /= preprocess_param;
             }
         }
-
-        if debug {
-            println!("det {:?}", det);
-        }
-
         if !kpss.is_none() {
             kpss.as_mut().unwrap().map_inplace(|x| *x /= preprocess_param);
             if debug {
-                println!("kpss {:?}", kpss);
+
             }
         }
-        // println!("det {:?}", det);
-        // println!("det: {:?}", &det.dim().0);
-        // println!("kpss {:?}", kpss);
+        if debug {
+            println!("det {:?}", det);
+            println!("kpss {:?}", kpss);
+        }
         (det, kpss)
+    }
+
+
+    pub async fn call(&self, image: &Mat, is_debug: Option<bool>) -> Result<(Array2<f32>, Option<Array3<f32>>), Error> {
+
+        let (preprocessed_img, scale) = match self._preprocess(&image, is_debug) {
+            Ok((preprocessed_img, scale)) => {(preprocessed_img, scale)}
+            Err(e) => {
+                return Err(Error::from(e))
+            }
+        };
+        let predicted_output = match self._forward(&preprocessed_img, is_debug).await {
+            Ok(predicted_output) => {predicted_output}
+            Err(e) => {
+                return Err(Error::from(e))
+            }
+        };
+        let (det, landmarks) = self._postprocess(predicted_output, scale, is_debug).await;
+
+        Ok((det, landmarks))
     }
 
 
@@ -627,60 +573,58 @@ impl RetinaFaceDetection {
 #[cfg(test)]
 mod tests {
     use crate::pipeline::module::face_detection::RetinaFaceDetection;
+    use crate::triton_client::client::triton::ModelConfigRequest;
+    use crate::triton_client::client::TritonInferenceClient;
     use crate::utils::utils::byte_data_to_opencv;
 
     #[tokio::test]
     async fn test_retina_face_detection() {
-        let retina_face_detection = match RetinaFaceDetection::new(
-            "",
-            "8603",
-            (640, 640),
-            1,
-            0.7,
-            0.45,
-        ).await
-        {
-            Ok(retina_face_detection)  => retina_face_detection,
-            Err(e) => {
-                println!("{:?}", e);
-                return
-            }
-        };
-    }
-
-    // #[tokio::test]
-    // async fn test_preprocess() {
-    //     let retina_face_detection = match RetinaFaceDetection::new(
-    //         "",
-    //         "",
-    //         (640, 640),
-    //         1,
-    //         0.7,
-    //         0.45,
-    //     ).await
-    //     {
-    //         Ok(retina_face_detection)  => retina_face_detection,
-    //         Err(e) => {
-    //             println!("{:?}", e);
-    //             return
-    //         }
-    //     };
-    //
-    //     let im_bytes: &[u8] = include_bytes!("");
-    //     let image = byte_data_to_opencv(im_bytes).unwrap();
-    //
-    //     let (preprocessed_img, scale) = retina_face_detection._preprocess(&image, Some(true)).unwrap();
-    //
-    //     println!("{:?}", &preprocessed_img);
-    //     println!("Preprocessing done with scale: {}", scale);
-    //
-    //     let predicted_output = retina_face_detection._forward(&preprocessed_img, None).await.unwrap();
-    //
-    //     retina_face_detection._postprocess(predicted_output, scale, None).await;
-    // }
-
-
-    #[tokio::test]
-    async fn test_forward() {
+        // let triton_host = "";
+        // let triton_port = "";
+        // let im_bytes: &[u8] = include_bytes!("");
+        // let image = byte_data_to_opencv(im_bytes).unwrap();
+        //
+        // let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
+        //     Ok(triton_infer_client) => triton_infer_client,
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let model_name = "face_detection_retina".to_string();
+        //
+        // let face_detection_model_config = match triton_infer_client
+        //     .model_config(ModelConfigRequest {
+        //         name: model_name.to_owned(),
+        //         version: "".to_string(),
+        //     }).await {
+        //     Ok(model_config_resp) => {model_config_resp}
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let retina_face_detection = match RetinaFaceDetection::new(
+        //     triton_infer_client,
+        //     face_detection_model_config,
+        //     model_name,
+        //     (640, 640),
+        //     1,
+        //     0.7,
+        //     0.45,
+        // ).await
+        // {
+        //     Ok(retina_face_detection)  => retina_face_detection,
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let (preprocessed_img, scale) = retina_face_detection._preprocess(&image, Some(true)).unwrap();
+        // let predicted_output = retina_face_detection._forward(&preprocessed_img, None).await.unwrap();
+        // retina_face_detection._postprocess(predicted_output, scale, Some(true)).await;
     }
 }

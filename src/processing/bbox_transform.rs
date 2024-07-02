@@ -1,12 +1,4 @@
-use ndarray::prelude::*;
 use ndarray::{Array2, stack, Axis, s};
-use ndarray::{ArrayBase, Ix2};
-
-///     Function Signature: The function bbox_overlaps_py takes two 2D arrays, boxes and query_boxes, each containing bounding boxes represented by 4 coordinates.
-///     Initialization: It initializes the overlaps array to store the IoU values.
-///     IoU Calculation: For each pair of bounding boxes from boxes and query_boxes, it calculates the width (iw) and height (ih) of the intersection.
-///     If there is an intersection (iw > 0 and ih > 0), it computes the area of both boxes and their union to calculate the IoU and store it in the overlaps array.
-///     Return: The function returns the overlaps array.
 pub fn bbox_overlaps_py(boxes: &Array2<f32>, query_boxes: &Array2<f32>) -> Array2<f32> {
     let n_ = boxes.nrows();
     let k_ = query_boxes.nrows();
@@ -197,7 +189,7 @@ pub fn iou_pred(boxes: &Array2<f32>, box_deltas: &Array2<f32>, num_classes: usiz
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{array, ArrayView2};
+    use ndarray::{array};
     use crate::processing::bbox_transform::{clip_boxes, clip_points, landmark_pred, nonlinear_transform, nonlinear_pred, iou_pred};
 
     #[test]
@@ -285,22 +277,4 @@ mod tests {
         let pred_points = landmark_pred(&boxes, &point_deltas);
         println!("Predicted Points: {:?}", pred_points);
     }
-
-    // #[test]
-    // fn test_bbox_overlaps_py() {
-    //     let boxes = <ArrayView2<f32>>::from(array![
-    //         [0.0, 0.0, 1.0, 1.0],
-    //         [1.0, 1.0, 2.0, 2.0]
-    //     ]);
-    //
-    //     let query_boxes = <ArrayView2<f32>>::from(array![
-    //         [0.5, 0.5, 1.5, 1.5],
-    //         [1.0, 1.0, 2.0, 2.0]
-    //     ]);
-    //
-    //     let overlaps = bbox_overlaps(boxes, query_boxes);
-    //     println!("Overlaps: {:?}", overlaps);
-    // }
-
-
 }

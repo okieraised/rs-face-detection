@@ -1,6 +1,5 @@
-use ndarray::{array, Array, Array1, Array2, Axis, s, Ix2};
-use std::ops::{AddAssign, Div};
-use ndarray_rand::rand_distr::num_traits::real::Real;
+use ndarray::{array, Array, Array1, Array2, Axis, s};
+use std::ops::{AddAssign};
 use std::collections::HashMap;
 
 
@@ -114,14 +113,6 @@ pub fn generate_anchors_fpn(
     anchors
 }
 
-/// Extracts feature strides from the configuration, sorts them, and iterates over them.
-/// For each stride, it retrieves the associated configuration,
-/// calls generate_anchors2 with the base size, ratios, scales, stride, and dense anchor flag,
-/// and collects the generated anchors into a vector.
-///
-/// Description
-/// * `dense_anchor` - bool
-/// * `cfg` - Option<&Config>
 pub fn generate_anchors_fpn2(dense_anchor: bool, cfg: Option<&Config>) -> Vec<Array2<f32>> {
     let config = if let Some(cfg) = cfg {
         cfg

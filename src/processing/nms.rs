@@ -1,7 +1,4 @@
 use ndarray::{Array1, Array2};
-use ndarray::prelude::*;
-
-use ndarray::prelude::*;
 
 pub fn nms(dets: &Array2<f32>, thresh: f32) -> Vec<usize> {
     let scores = dets.column(4);

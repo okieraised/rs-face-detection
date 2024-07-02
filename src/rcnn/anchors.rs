@@ -1,7 +1,3 @@
-// Used the ndarray crate to handle multi-dimensional arrays. The logic of the Python function is preserved,
-// iterating over width, height, and the number of base anchors to calculate the resulting anchors.
-// The function returns a Array4<f32>.
-
 use ndarray::{Array2, Array4};
 
 pub fn anchors(height: usize, width: usize, stride: usize, base_anchors: &Array2<f32>) -> Array4<f32> {

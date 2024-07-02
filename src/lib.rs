@@ -1,20 +1,37 @@
 mod rcnn;
 mod processing;
-mod triton_client;
-mod pipeline;
+pub mod triton_client;
+pub mod pipeline;
 mod utils;
-
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::triton_client::client::TritonInferenceClient;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    #[tokio::test]
+    async fn test_pipeline() {
+        let triton_host = "";
+        let triton_port = "";
+
+        let im_bytes: &[u8] = include_bytes!("");
+
+
+        let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
+            Ok(triton_infer_client) => triton_infer_client,
+            Err(e) => {
+                println!("{:?}", e);
+                return
+            }
+        };
+
+        let pipeline = match crate::pipeline::face_pipeline::pipeline::FacePipeline::new(triton_host, triton_port, Some(true), Some(false)).await {
+            Ok(pipeline) => {pipeline}
+            Err(e) => {
+                println!("{:?}", e);
+                return
+            }
+        };
+
+        let _ = pipeline.extract(im_bytes).await;
     }
 }

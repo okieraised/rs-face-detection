@@ -1,9 +1,5 @@
 use anyhow::{Error, Result};
-use std::ptr::null;
-use std::time;
-use opencv::core::Mat;
 use tonic::transport::Channel;
-use tonic::Request;
 
 pub mod triton {
     tonic::include_proto!("inference");
@@ -202,18 +198,14 @@ impl TritonInferenceClient {
 
 #[cfg(test)]
 mod tests {
-    use nalgebra::vector;
-    use ndarray_rand::rand_distr::num_traits::FromPrimitive;
-    use crate::triton_client;
     use crate::triton_client::client::{TritonInferenceClient, RepositoryIndexRequest};
     use crate::triton_client::client::triton::{InferTensorContents, ModelConfigRequest};
     use crate::triton_client::client::triton::ModelInferRequest;
-    use crate::triton_client::client::Mat;
     use crate::triton_client::client::triton::model_infer_request::InferInputTensor;
 
     #[tokio::test]
     async fn test_repository_index() {
-        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+        let client = TritonInferenceClient::new("", "").await.unwrap();
 
         let models = client
             .repository_index(RepositoryIndexRequest {
@@ -228,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_config() {
-        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+        let client = TritonInferenceClient::new("", "").await.unwrap();
 
         let models = client
             .model_config(ModelConfigRequest {
@@ -247,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_infer() {
-        let mut client = TritonInferenceClient::new("", "").await.unwrap();
+        let client = TritonInferenceClient::new("", "").await.unwrap();
 
         let req = ModelInferRequest {
             model_name: "face_detection_retina".to_string(),

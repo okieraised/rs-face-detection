@@ -1,8 +1,8 @@
-use std::cmp::min;
 use anyhow::Error;
-use ndarray::{Array, Array1, Array2, Array3, ArrayView, Ix1};
+use ndarray::{Array1, Array2, Array3};
 use opencv::core::{Mat, MatTraitConst};
 
+#[derive(Debug)]
 pub struct FaceSelection {
     margin_center_left_ratio: f32,
     margin_center_right_ratio: f32,
@@ -69,7 +69,7 @@ impl FaceSelection {
         Ok(face_width / image_width > 0.25)
     }
 
-    pub fn _process(&self, img: &Mat, face_boxes: Array2<f32>, key_points: Option<Array3<f32>>, is_enroll: Option<bool>, is_debug: Option<bool>) -> Result<(Option<Array1<f32>>, Option<Array2<f32>>), Error> {
+    pub fn call(&self, img: &Mat, face_boxes: Array2<f32>, key_points: Option<Array3<f32>>, is_enroll: Option<bool>, is_debug: Option<bool>) -> Result<(Option<Array1<f32>>, Option<Array2<f32>>), Error> {
 
         let debug = is_debug.unwrap_or(false);
 
@@ -96,7 +96,8 @@ impl FaceSelection {
                 }
             }
             if debug {
-                println!("biggest_bbox: {:?} | biggest_key_point: {:?}", biggest_bbox, biggest_key_point);
+                println!("outbboxes: {:?}", &biggest_bbox,);
+                println!("out_keypoint: {:?}", &biggest_key_point);
             }
             return Ok((biggest_bbox, biggest_key_point));
         }
@@ -125,9 +126,6 @@ impl FaceSelection {
                 valid_boxes.push(detection.to_vec());
             }
         }
-        if debug {
-            println!("valid_boxes: {:?}", &valid_boxes);
-        }
 
         let mut center_boxes: Vec<Vec<f32>> = Vec::new();
         for result in valid_boxes.iter() {
@@ -135,9 +133,6 @@ impl FaceSelection {
             if -margin_center_left <= box_center_width - x_cen && box_center_width - x_cen <= margin_center_right {
                 center_boxes.push(result.clone());
             }
-        }
-        if debug {
-            println!("center_boxes: {:?}", &center_boxes);
         }
 
         if center_boxes.len() == 0 {
@@ -157,9 +152,6 @@ impl FaceSelection {
                 max_size = tem_size;
                 outbboxes = Some(<Array1<f32>>::from(result.to_owned()));
             }
-        }
-        if debug {
-            println!("outbboxes: {:?}", &outbboxes);
         }
         if outbboxes.is_none() {
             return Ok((None, None))
@@ -201,39 +193,60 @@ impl FaceSelection {
 mod tests {
     use crate::pipeline::module::face_detection::RetinaFaceDetection;
     use crate::pipeline::module::face_selection::FaceSelection;
+    use crate::triton_client::client::triton::ModelConfigRequest;
+    use crate::triton_client::client::TritonInferenceClient;
     use crate::utils::utils::byte_data_to_opencv;
 
-    // #[tokio::test]
-    // async fn test_face_selection() {
-    //
-    //     let retina_face_detection = match RetinaFaceDetection::new(
-    //         "",
-    //         "",
-    //         (640, 640),
-    //         1,
-    //         0.7,
-    //         0.45,
-    //     ).await
-    //     {
-    //         Ok(retina_face_detection)  => retina_face_detection,
-    //         Err(e) => {
-    //             println!("{:?}", e);
-    //             return
-    //         }
-    //     };
-    //
-    //     let im_bytes: &[u8] = include_bytes!("");
-    //     let image = byte_data_to_opencv(im_bytes).unwrap();
-    //
-    //     let (preprocessed_img, scale) = retina_face_detection._preprocess(&image, Some(true)).unwrap();
-    //
-    //     let predicted_output = retina_face_detection._forward(&preprocessed_img, None).await.unwrap();
-    //
-    //     let (detections, key_points) = retina_face_detection._postprocess(predicted_output, scale, None).await;
-    //
-    //     let face_selection = FaceSelection::new(0.3, 0.3, 0.1, 0.0075).await;
-    //
-    //     face_selection._process(&image, detections, key_points, Some(false), None);
-    //
-    // }
+    #[tokio::test]
+    async fn test_face_selection() {
+        // let triton_host = "";
+        // let triton_port = "";
+        // let im_bytes: &[u8] = include_bytes!("");
+        // let image = byte_data_to_opencv(im_bytes).unwrap();
+        //
+        // let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
+        //     Ok(triton_infer_client) => triton_infer_client,
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let model_name = "face_detection_retina".to_string();
+        //
+        // let face_detection_model_config = match triton_infer_client
+        //     .model_config(ModelConfigRequest {
+        //         name: model_name.to_owned(),
+        //         version: "".to_string(),
+        //     }).await {
+        //     Ok(model_config_resp) => {model_config_resp}
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let retina_face_detection = match RetinaFaceDetection::new(
+        //     triton_infer_client,
+        //     face_detection_model_config,
+        //     model_name,
+        //     (640, 640),
+        //     1,
+        //     0.7,
+        //     0.45,
+        // ).await
+        // {
+        //     Ok(retina_face_detection)  => retina_face_detection,
+        //     Err(e) => {
+        //         println!("{:?}", e);
+        //         return
+        //     }
+        // };
+        //
+        // let (detections, key_points) = retina_face_detection.call(&image, Some(true)).await.unwrap();
+        //
+        // let face_selection = FaceSelection::new(0.3, 0.3, 0.1, 0.0075).await;
+        // face_selection.call(&image, detections, key_points, Some(false), None);
+
+    }
 }
