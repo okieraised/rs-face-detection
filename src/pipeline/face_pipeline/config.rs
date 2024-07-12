@@ -1,3 +1,4 @@
+use std::vec;
 use ndarray::Array2;
 
 #[derive(Debug)]
@@ -112,6 +113,61 @@ impl FaceSelectionConfig {
             minimum_face_ratio: 0.0075,
             minimum_width_height_ratio: 0.65,
             maximum_width_height_ratio: 1.1,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FaceAntiSpoofingConfig {
+    pub model_name: Vec<String>,
+    pub scale: (f32, f32, f32, f32),
+    pub image_size: Vec<(i32, i32)>,
+    pub threshold: f32,
+    pub timeout: i32,
+    pub batch_size: i32,
+}
+
+impl FaceAntiSpoofingConfig{
+    pub fn new() -> Self {
+        FaceAntiSpoofingConfig {
+            model_name: vec![
+                "miniFAS_4".to_string(),
+                "miniFAS_2_7".to_string(),
+                "miniFAS_2".to_string(),
+                "miniFAS_1".to_string(),
+            ],
+            scale: (4.0, 2.7, 2.0, 1.0),
+            image_size: vec![
+                (80, 80),
+                (80, 80),
+                (256, 256),
+                (128, 128),
+            ],
+            threshold: 0.55,
+            timeout: 20,
+            batch_size: 1,
+        }
+    }
+}
+
+
+#[derive(Debug)]
+pub struct FaceQualityAssessmentConfig {
+    pub model_name: String,
+    pub timeout: i32,
+    pub image_size: (i32, i32),
+    pub batch_size: i32,
+    threshold: f32,
+}
+
+impl FaceQualityAssessmentConfig {
+    pub fn new() -> Self {
+        FaceQualityAssessmentConfig {
+            model_name: "face_quality_assetment".to_string(),
+            timeout: 20,
+            image_size: (112, 112),
+            batch_size: 1,
+            threshold: 55.0,
         }
     }
 }
