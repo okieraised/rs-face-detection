@@ -45,7 +45,7 @@ impl FaceQuality {
 
         let model_cfg = match &self.triton_model_config.config {
             None => {
-                return Err(Error::msg("face quality model config is empty"))
+                return Err(Error::msg("face_quality - face quality model config is empty"))
             }
             Some(model_cfg) => {model_cfg}
         };
@@ -136,8 +136,9 @@ impl FaceQuality {
 
             for (idx, output) in &mut model_out.outputs.iter_mut().enumerate() {
 
-                println!("{:?}", output);
-
+                if debug {
+                    println!("face_quality - output: {:?}", output);
+                }
                 let dims = &output.shape;
                 let dimensions: [usize; 2] = [
                     dims[0] as usize,
@@ -168,8 +169,8 @@ impl FaceQuality {
         }
 
         if debug {
-            println!("predict {:?}", &idxs);
-            println!("score {:?}", &scores);
+            println!("face_quality - predict {:?}", &idxs);
+            println!("face_quality - score {:?}", &scores);
         }
 
         Ok((scores, idxs))

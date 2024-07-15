@@ -1,14 +1,17 @@
+use std::iter::zip;
 use anyhow::Error;
-use ndarray::{Array1, Array3, Array4, s};
+use ndarray::{Array1, Array2, Array3, Array4, Axis, IntoDimension, s, stack};
 use opencv::core::{Mat, MatTraitConst, Rect, Size};
 use opencv::imgproc::{COLOR_RGB2BGR, cvt_color, INTER_LINEAR, resize};
-use crate::triton_client::client::triton::ModelConfigResponse;
+use crate::triton_client::client::triton::{InferTensorContents, ModelConfigResponse, ModelInferRequest};
+use crate::triton_client::client::triton::model_infer_request::InferInputTensor;
 use crate::triton_client::client::TritonInferenceClient;
+use crate::utils::utils::u8_to_f32_vec;
 
 #[derive(Debug)]
 pub(crate) struct FaceAntiSpoofing {
     triton_infer_client: TritonInferenceClient,
-    triton_model_config: ModelConfigResponse,
+    triton_model_config: Vec<ModelConfigResponse>,
     model_name: Vec<String>,
     scales: Vec<f32>,
     image_sizes: Vec<(i32, i32)>,
@@ -30,7 +33,7 @@ struct CropParams {
 impl FaceAntiSpoofing {
     pub async fn new(
         triton_infer_client: TritonInferenceClient,
-        triton_model_config: ModelConfigResponse,
+        triton_model_config: Vec<ModelConfigResponse>,
         model_name: Vec<String>,
         image_sizes: Vec<(i32, i32)>,
         scales: Vec<f32>,
@@ -48,34 +51,130 @@ impl FaceAntiSpoofing {
         })
     }
 
-    async fn call(&self, imgs: Vec<&Mat>, face_boxes: Vec<&Array1<f32>>, is_debug: Option<bool>) {
+    pub async fn call(&self, imgs: Vec<&Mat>, face_boxes: Vec<&Array1<f32>>, is_debug: Option<bool>) -> Result< Vec<Array1<i32>>, Error> {
 
         let debug = is_debug.unwrap_or(false);
 
         let mut list_image_scales: &mut Vec<Vec<Mat>> = &mut Vec::with_capacity(face_boxes.len());
         let mut list_weight_scales: &mut Vec<Vec<f32>> = &mut Vec::with_capacity(face_boxes.len());
 
-
         for (image, face_box) in imgs.into_iter().zip(face_boxes) {
             let mut converted_image = Mat::default();
-            cvt_color(&image, &mut converted_image, COLOR_RGB2BGR, 0).unwrap();
-            let (tmps, weights) = self._get_scale_image(image, face_box).unwrap();
+            match cvt_color(&image, &mut converted_image, COLOR_RGB2BGR, 0) {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(Error::from(e))
+                }
+            };
+
+            let (tmps, weights) = match self._get_scale_image(image, face_box, is_debug) {
+                Ok((tmps, weights)) => {(tmps, weights)}
+                Err(e) => {
+                    return Err(Error::from(e))
+                }
+            };
+
             for (i, _) in self.scales.clone().into_iter().enumerate() {
                 list_image_scales.insert(i, vec![tmps.clone()[i].clone()]).to_owned();
                 list_weight_scales.insert(i, vec![weights.clone()[i]]).to_owned();
             }
         }
 
-        for (i, _) in self.scales.iter().enumerate() {
-            let preprocessed_images = self._preprocess(&list_image_scales[i], i).unwrap();
+        let mut outputs: Vec<Vec<Array2<f32>>> = vec![];
+
+        for (idx, _) in self.scales.iter().enumerate() {
+            let preprocessed_images = match self._preprocess(&list_image_scales[idx], idx) {
+                Ok(preprocessed_images) => {preprocessed_images}
+                Err(e) => {
+                    return Err(Error::from(e))
+                }
+            };
 
             for i in (0..preprocessed_images.shape()[0]).step_by(self.batch_size as usize) {
-                let x = preprocessed_images.slice(s![i..i + self.batch_size as usize, .., .., ..]);
-                println!("x: {:?}", x);
+                let tensors = preprocessed_images.slice(s![i..i + self.batch_size as usize, .., .., ..]);
+                let output_tensor = match self.infer(idx, &tensors.to_owned()).await {
+                    Ok(output_tensor) => {
+                        outputs.push(output_tensor);
+                    }
+                    Err(e) => {
+                        return Err(Error::from(e))
+                    }
+                };
             }
-
-
         }
+        let result = self._postprocess(&outputs, list_weight_scales);
+
+        if debug {
+            println!("face_anti_spoofing - result: {:?}", result)
+        }
+
+        Ok(result)
+    }
+
+    async fn infer(&self, idx: usize, tensors: &Array4<f32>) -> Result<Vec<Array2<f32>>, Error>{
+        let flattened_vec: Vec<f32> = tensors.iter().cloned().collect();
+
+        let model_cfg = match &self.triton_model_config[idx].config {
+            None => {
+                return Err(Error::msg("face_anti_spoofing - face anti-spoofing model config is empty"))
+            }
+            Some(model_cfg) => {model_cfg}
+        };
+
+        let model_request = ModelInferRequest{
+            model_name: self.model_name[idx].to_owned(),
+            model_version: "".to_string(),
+            id: "".to_string(),
+            parameters: Default::default(),
+            inputs: vec![InferInputTensor {
+                name: model_cfg.input[0].name.to_string(),
+                datatype: model_cfg.input[0].data_type().as_str_name()[5..].to_uppercase(),
+                shape: model_cfg.input[0].dims.to_owned(),
+                parameters: Default::default(),
+                contents: Option::from(InferTensorContents {
+                    bool_contents: vec![],
+                    int_contents: vec![],
+                    int64_contents: vec![],
+                    uint_contents: vec![],
+                    uint64_contents: vec![],
+                    fp32_contents: flattened_vec,
+                    fp64_contents: vec![],
+                    bytes_contents: vec![],
+                }),
+            }],
+            outputs: Default::default(),
+            raw_input_contents: vec![],
+        };
+
+        let mut model_out = match self.triton_infer_client.model_infer(model_request).await {
+            Ok(model_out) => model_out,
+            Err(e) => {
+                return Err(Error::from(e))
+            }
+        };
+
+        let mut net_out: Vec<Array2<f32>> = vec![];
+
+        for (idx, output) in &mut model_out.outputs.iter_mut().enumerate() {
+            let dims = &output.shape;
+            let dimensions: [usize; 2] = [
+                dims[0] as usize,
+                dims[1] as usize,
+            ];
+            let u8_array: &[u8] = &model_out.raw_output_contents[idx];
+            let f_array = u8_to_f32_vec(u8_array);
+
+            let array2_f32: Array2<f32> = match Array2::from_shape_vec(dimensions.into_dimension(), f_array) {
+                Ok(array2_f32) => {array2_f32}
+                Err(e) => {
+                    return Err(Error::from(e))
+                }
+            };
+            net_out.push(array2_f32);
+        }
+
+        Ok(net_out)
+
     }
 
     fn _preprocess(&self, images: &Vec<Mat>, index: usize) -> Result<Array4<f32>, Error>{
@@ -117,7 +216,35 @@ impl FaceAntiSpoofing {
         Ok(preprocessed_images)
     }
 
-    fn _get_scale_image(&self, image: &Mat, face_box: &Array1<f32>) -> Result<(Vec<Mat>, Vec<f32>), opencv::Error> {
+    fn _postprocess(&self, outputs: &Vec<Vec<Array2<f32>>>, list_weight_scales: &Vec<Vec<f32>>) -> Vec<Array1<i32>> {
+
+        let mut results = Vec::new();
+
+        // Transpose the outer Vec<Vec<>> to Vec<Vec<>> for parallel iteration
+        let transposed_outputs: Vec<Vec<&Array2<f32>>> = (0..outputs[0].len())
+            .map(|i| outputs.iter().map(|output| &output[i]).collect())
+            .collect();
+
+        for (output, weights) in zip(transposed_outputs, list_weight_scales.iter()) {
+            let mut live_score: Array1<f32> = Array1::zeros(output[0].dim().0);
+            let mut total_weight = 0.0;
+
+            for (o, &w) in zip(output, weights) {
+                live_score = live_score + o.column(1).to_owned() * w;
+                total_weight += w;
+            }
+
+            live_score /= total_weight;
+            let liveness = live_score.mapv(|score| if score > 0.55 { 1 } else { 0 });
+            results.push(liveness);
+        }
+
+        results
+    }
+
+    fn _get_scale_image(&self, image: &Mat, face_box: &Array1<f32>, is_debug: Option<bool>) -> Result<(Vec<Mat>, Vec<f32>), Error> {
+
+        let debug = is_debug.unwrap_or(false);
 
         let det_xmin = face_box[0];
         let det_ymin = face_box[1];
@@ -151,16 +278,26 @@ impl FaceAntiSpoofing {
                 crop: true,
             };
 
-            let (crop, weight) = self._crop_image(param).unwrap();
+            let (crop, weight) = match self._crop_image(param, is_debug) {
+                Ok((crop, weight)) => {(crop, weight)}
+                Err(e) => return Err(Error::from(e))
+            };
             crops.push(crop);
             weights.push(weight);
+        }
+
+        if debug {
+            println!("face_anti_spoofing - crops: {:?}", crops);
+            println!("face_anti_spoofing - weights: {:?}", weights);
         }
 
         Ok((crops, weights))
     }
 
 
-    fn _crop_image(&self, param: CropParams) -> Result<(Mat, f32), Error> {
+    fn _crop_image(&self, param: CropParams, is_debug: Option<bool>) -> Result<(Mat, f32), Error> {
+
+        let debug = is_debug.unwrap_or(false);
 
         if !param.crop {
             let mut dst_img = Mat::default();
@@ -179,7 +316,9 @@ impl FaceAntiSpoofing {
 
         let (left_top_x, left_top_y, right_bottom_x, right_bottom_y, weight) = self._get_new_box(src_w, src_h, param.bbox, param.scale);
 
-        println!("{:?} {:?} {:?} {:?} {:?}", left_top_x, left_top_y, right_bottom_x, right_bottom_y, weight);
+        if debug {
+            println!("{:?} {:?} {:?} {:?} {:?}", left_top_x, left_top_y, right_bottom_x, right_bottom_y, weight);
+        }
 
         let roi = Rect::new(left_top_x, left_top_y, right_bottom_x - left_top_x + 1, right_bottom_y - left_top_y + 1);
         let img = match Mat::roi(&param.org_img, roi) {
@@ -248,95 +387,116 @@ impl FaceAntiSpoofing {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Error;
     use ndarray::{Array1, s};
     use crate::pipeline::module::face_antispoofing::FaceAntiSpoofing;
     use crate::pipeline::module::face_detection::RetinaFaceDetection;
     use crate::pipeline::module::face_selection::FaceSelection;
-    use crate::triton_client::client::triton::ModelConfigRequest;
+    use crate::triton_client::client::triton::{ModelConfigRequest, ModelConfigResponse};
     use crate::triton_client::client::TritonInferenceClient;
     use crate::utils::utils::byte_data_to_opencv;
 
-    #[tokio::test]
-    async fn test_face_antispoofing() {
-        let triton_host = "";
-        let triton_port = "";
-        let im_bytes: &[u8] = include_bytes!("");
-        let image = byte_data_to_opencv(im_bytes).unwrap();
-
-        let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
-            Ok(triton_infer_client) => triton_infer_client,
-            Err(e) => {
-                println!("{:?}", e);
-                return
-            }
-        };
-
-        let model_name = "face_detection_retina".to_string();
-
-        let face_detection_model_config = match triton_infer_client
-            .model_config(ModelConfigRequest {
-                name: model_name.to_owned(),
-                version: "".to_string(),
-            }).await {
-            Ok(model_config_resp) => {model_config_resp}
-            Err(e) => {
-                println!("{:?}", e);
-                return
-            }
-        };
-
-        let retina_face_detection = match RetinaFaceDetection::new(
-            triton_infer_client.clone(),
-            face_detection_model_config,
-            model_name,
-            (640, 640),
-            1,
-            0.7,
-            0.45,
-        ).await
-        {
-            Ok(retina_face_detection)  => retina_face_detection,
-            Err(e) => {
-                println!("{:?}", e);
-                return
-            }
-        };
-        let (preprocessed_img, scale) = retina_face_detection.call(&image, Some(false)).await.unwrap();
-        let face_selection = FaceSelection::new(0.3, 0.3, 0.1, 0.0075).await;
-        let (selected_face_box, selected_face_point) = face_selection.call(&image, preprocessed_img, scale, Some(false), None).unwrap();
-
-
-
-        let face_antispoofing = match FaceAntiSpoofing::new(
-            triton_infer_client.clone(),
-            Default::default(),
-            vec![],
-            vec![
-                (80, 80),
-                (80, 80),
-                (256, 256),
-                (128, 128),
-            ],
-            vec![4.0, 2.7, 2.0, 1.0],
-            1,
-            0.55).await {
-            Ok(face_antispoofing) => {face_antispoofing}
-            Err(e) => {
-                println!("{:?}", e);
-                return
-            }
-        };
-
-        if let Some(_selected_face_box) = selected_face_box {
-
-            let sliced_boxes = _selected_face_box.slice(s![..4]);
-            let boxes: Array1<f32> = sliced_boxes.to_owned();
-
-            println!("boxes: {:?}", boxes);
-
-            face_antispoofing.call(vec![&image],vec![&boxes], None).await;
-        }
-
-    }
+    // #[tokio::test]
+    // async fn test_face_antispoofing() {
+    //     let triton_host = "";
+    //     let triton_port = "";
+    //     let im_bytes: &[u8] = include_bytes!("");
+    //     let image = byte_data_to_opencv(im_bytes).unwrap();
+    //
+    //     let triton_infer_client = match TritonInferenceClient::new(triton_host, triton_port).await {
+    //         Ok(triton_infer_client) => triton_infer_client,
+    //         Err(e) => {
+    //             println!("{:?}", e);
+    //             return
+    //         }
+    //     };
+    //
+    //     let model_name = "face_detection_retina".to_string();
+    //
+    //     let face_detection_model_config = match triton_infer_client
+    //         .model_config(ModelConfigRequest {
+    //             name: model_name.to_owned(),
+    //             version: "".to_string(),
+    //         }).await {
+    //         Ok(model_config_resp) => {model_config_resp}
+    //         Err(e) => {
+    //             println!("{:?}", e);
+    //             return
+    //         }
+    //     };
+    //
+    //     let retina_face_detection = match RetinaFaceDetection::new(
+    //         triton_infer_client.clone(),
+    //         face_detection_model_config,
+    //         model_name,
+    //         (640, 640),
+    //         1,
+    //         0.7,
+    //         0.45,
+    //     ).await
+    //     {
+    //         Ok(retina_face_detection)  => retina_face_detection,
+    //         Err(e) => {
+    //             println!("{:?}", e);
+    //             return
+    //         }
+    //     };
+    //     let (preprocessed_img, scale) = retina_face_detection.call(&image, Some(false)).await.unwrap();
+    //     let face_selection = FaceSelection::new(0.3, 0.3, 0.1, 0.0075).await;
+    //     let (selected_face_box, selected_face_point) = face_selection.call(&image, preprocessed_img, scale, Some(false), None).unwrap();
+    //
+    //
+    //     let model_names: Vec<String> = vec![
+    //         "miniFAS_4".to_string(),
+    //         "miniFAS_2_7".to_string(),
+    //         "miniFAS_2".to_string(),
+    //         "miniFAS_1".to_string(),
+    //     ];
+    //
+    //
+    //     let mut model_antispoofing_config: Vec<ModelConfigResponse> = vec![];
+    //
+    //     for model_name in &model_names {
+    //         let face_antispoofing_model_config = match triton_infer_client
+    //             .model_config(ModelConfigRequest {
+    //                 name: model_name.to_owned(),
+    //                 version: "".to_string(),
+    //             }).await {
+    //             Ok(model_config_resp) => {model_config_resp}
+    //             Err(e) => {
+    //                 println!("{:?}", e);
+    //                 return
+    //             }
+    //         };
+    //         model_antispoofing_config.push(face_antispoofing_model_config)
+    //     }
+    //
+    //     let face_antispoofing = match FaceAntiSpoofing::new(
+    //         triton_infer_client.clone(),
+    //         model_antispoofing_config.clone(),
+    //         model_names.clone(),
+    //         vec![
+    //             (80, 80),
+    //             (80, 80),
+    //             (256, 256),
+    //             (128, 128),
+    //         ],
+    //         vec![4.0, 2.7, 2.0, 1.0],
+    //         1,
+    //         0.55).await {
+    //         Ok(face_antispoofing) => {face_antispoofing}
+    //         Err(e) => {
+    //             println!("{:?}", e);
+    //             return
+    //         }
+    //     };
+    //
+    //     if let Some(_selected_face_box) = selected_face_box {
+    //
+    //         let sliced_boxes = _selected_face_box.slice(s![..4]);
+    //         let boxes: Array1<f32> = sliced_boxes.to_owned();
+    //
+    //         face_antispoofing.call(vec![&image],vec![&boxes], None).await;
+    //     }
+    //
+    // }
 }

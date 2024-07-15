@@ -1,7 +1,6 @@
 extern crate opencv;
 extern crate ndarray;
 extern crate ndarray_linalg as linalg;
-
 use crate::utils::utils::array2_to_mat;
 use opencv::core::{Mat, Rect, Scalar, Size, BORDER_CONSTANT};
 use opencv::imgproc::{warp_affine, resize, INTER_LINEAR};

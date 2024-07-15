@@ -76,7 +76,7 @@ impl FaceExtraction {
         Ok(preprocessed_images)
     }
 
-    pub async fn call(&self, imgs: &[Mat], is_debug: Option<bool>) ->Result<Vec<Array2<f32>>, Error> {
+    pub async fn call(&self, imgs: &[Mat], is_debug: Option<bool>) -> Result<Vec<Array2<f32>>, Error> {
         let debug = is_debug.unwrap_or(false);
 
         let preprocessed_images = match self._preprocess(imgs, is_debug) {
@@ -87,7 +87,7 @@ impl FaceExtraction {
 
         let model_cfg = match &self.triton_model_config.config {
             None => {
-                return Err(Error::msg("face extraction model config is empty"))
+                return Err(Error::msg("face_extraction - face extraction model config is empty"))
             }
             Some(model_cfg) => {model_cfg}
         };

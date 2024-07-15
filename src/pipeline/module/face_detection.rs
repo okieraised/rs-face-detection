@@ -236,7 +236,7 @@ impl RetinaFaceDetection {
 
         let model_cfg = match &self.triton_model_config.config {
             None => {
-                return Err(Error::msg("face detection model config is empty"))
+                return Err(Error::msg("face_detection - face detection model config is empty"))
             }
             Some(model_cfg) => {model_cfg}
         };
@@ -304,7 +304,7 @@ impl RetinaFaceDetection {
             };
             let result_index = match cfg_outputs.iter().position(|r| *r.name == output.name) {
                 None => {
-                    return Err(Error::msg("no matched model index"))
+                    return Err(Error::msg("face_detection - no matched model index"))
                 }
                 Some(result_index) => {result_index}
             };
@@ -463,8 +463,8 @@ impl RetinaFaceDetection {
                 }
             };
             if debug {
-                println!("landmarks: {:?}", &landmarks);
-                println!("det: {:?}", &det);
+                println!("face_detection - landmarks: {:?}", &landmarks);
+                println!("face_detection - det: {:?}", &det);
             }
         }
         Ok((det, landmarks))
@@ -486,8 +486,8 @@ impl RetinaFaceDetection {
             }
         }
         if debug {
-            println!("det {:?}", det);
-            println!("kpss {:?}", kpss);
+            println!("face_detection - det {:?}", det);
+            println!("face_detection - kpss {:?}", kpss);
         }
         (det, kpss)
     }
